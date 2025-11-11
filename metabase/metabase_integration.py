@@ -107,3 +107,5 @@ def courier_exists(phone: str, timeout: int = 15):
 
     return False
 
+def get_promotions():
+    return None

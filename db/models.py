@@ -1,4 +1,5 @@
-from sqlalchemy import Column, Integer, String, text, Numeric, DateTime, ForeignKey, Boolean, UniqueConstraint
+from sqlalchemy import Column, Integer, String, text, Numeric, DateTime, ForeignKey, Boolean, UniqueConstraint, \
+    BigInteger
 from sqlalchemy.orm import relationship
 
 from .db import Base
@@ -6,7 +7,7 @@ from .db import Base
 class Users(Base):
     __tablename__ = "Users"   # маленькими буквами по конвенции; если у тебя именно KuperDB - поставь имя такое же
     id = Column(Integer, primary_key=True, index=True)
-    tg_id = Column(Integer, index=True, nullable=False)
+    tg_id = Column(BigInteger, index=True, nullable=False)
     fio = Column(String(255), nullable=False)
     phone = Column(String(40), nullable=False, index=True)
     city = Column(String(100), nullable=True)
