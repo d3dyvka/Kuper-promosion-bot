@@ -18,6 +18,11 @@ class PromoStates(StatesGroup):
     viewing = State()
     claiming = State()
 
+# Заменить/дополнить существующие состояния
 class WithdrawStates(StatesGroup):
-    ask_requisites = State()
-    confirm_withdraw = State()
+    choose_method = State()    # выбрать метод выплаты
+    ask_amount = State()       # ввести сумму вывода
+    sbp_phone = State()        # ввести телефон SBP
+    sbp_bank = State()         # ввести банк SBP
+    card_number = State()      # ввести номер карты
+    confirm_withdraw = State() # ожидание подтверждения менеджера

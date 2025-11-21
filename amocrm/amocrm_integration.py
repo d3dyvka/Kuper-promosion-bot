@@ -1,4 +1,4 @@
-# amocrm_integration.py
+# amocrm_integrations.py
 import os
 import time
 import logging
@@ -7,21 +7,21 @@ from urllib.parse import urljoin
 from typing import Optional, Dict, Any
 import asyncio
 from decouple import config
+import hashlib
+import hmac
+import base64
+from email.utils import formatdate
 
 logger = logging.getLogger("amocrm_sync")
 
-"""
-10572202 Ловкова Ксения Викторовна ksuha18pro@gmail.com
-12452534 Зорин Ростислав Александрович roster111999@gmail.com
-12815686 Илья illague@gmail.com
-12916074 Бабич zd333753@gmail.com
-13052414 Иван Программист vanroz333@gmail.com
-"""
-
 AMO_BASE_URL = config("AMO_BASE_URL")  # e.g. "https://yourcompany.amocrm.ru"
 AMO_ACCESS_TOKEN = config("AMO_ACCESS_TOKEN", "")
-PHONE_FIELD_ID = int(os.getenv("AMO_PHONE_FIELD_ID", "0"))  # id поля "Телефон" в вашей amoCRM
-RESPONSIBLE_USER_ID = int(config("AMO_RESPONSIBLE_USER_ID"))
+PHONE_FIELD_ID = int(os.getenv("AMO_PHONE_FIELD_ID", "0"))  # id поля "Телефон"
+RESPONSIBLE_USER_ID = int(config("AMO_RESPONSIBLE_USER_ID", "0") or 0)
+
+# chat integration config
+AMO_CHAT_SCOPE_ID = config("AMO_CHAT_SCOPE_ID", "")  # must be provided to create chats
+AMO_CHAT_SECRET = config("AMO_CHAT_SECRET", "")      # secret for X-Signature if available
 
 def _extract_id_from_response(j: Any, prefer_key: str | None = None) -> Optional[int]:
     try:
@@ -43,7 +43,7 @@ def _extract_id_from_response(j: Any, prefer_key: str | None = None) -> Optional
 
         return None
     except Exception:
-        logger.exception("Error extracting id from response: %s", repr(j))
+        logger.exception("Error extracting id from response")
         return None
 
 def _safe_json(response: requests.Response) -> Optional[Dict[str, Any]]:
@@ -67,10 +67,9 @@ def _build_session(access_token: str) -> requests.Session:
     return s
 
 def _full_url(path: str) -> str:
-    base = (AMO_BASE_URL or "").rstrip("/")
+    base = (AMO_BASE_URL or "").rstrip('/')
     return urljoin(base + "/", path.lstrip("/"))
 
-# --- Core sync class (requests) --------------------------------
 class AmoCRMSession:
     def __init__(self, base_url: str, access_token: str):
         if not base_url:
@@ -87,7 +86,6 @@ class AmoCRMSession:
             logger.error("AMO auth error %s: %s", status, text[:1000])
             return {"ok": False, "status": status, "json": parsed, "text": text, "error": "auth"}
         if status >= 400:
-            # логируем тело для диагностики
             logger.error("AMO API returned %s: %s", status, text[:1000])
             return {"ok": False, "status": status, "json": parsed, "text": text, "error": f"http_{status}"}
         return {"ok": True, "status": status, "json": parsed, "text": text}
@@ -97,7 +95,7 @@ class AmoCRMSession:
         params = {"query": phone}
         try:
             r = self.session.get(url, params=params, timeout=10)
-        except requests.RequestException as e:
+        except requests.RequestException:
             logger.exception("Network error while searching contact by phone")
             return None
 
@@ -112,11 +110,9 @@ class AmoCRMSession:
             logger.debug("Empty/non-JSON response while searching contact by phone: %s", r.text[:1000])
             return None
 
-        # поддерживаем разные ключи
         items = None
         if isinstance(data, dict):
             emb = data.get("_embedded") or {}
-            # иногда ключ называется 'items', иногда 'contacts'
             items = emb.get("items") or emb.get("contacts") or emb.get("leads")
         if items is None and isinstance(data, list):
             items = data
@@ -124,7 +120,6 @@ class AmoCRMSession:
         if not items:
             return None
 
-        # возвращаем первый элемент (dict) если есть
         if isinstance(items, list) and items:
             return items[0] if isinstance(items[0], dict) else None
 
@@ -163,7 +158,6 @@ class AmoCRMSession:
         if cid:
             return cid
 
-        # В лог детали ответа, чтобы знать новый формат
         logger.error("Unexpected create_contact response structure: %s", j)
         return None
 
@@ -203,6 +197,72 @@ class AmoCRMSession:
         logger.error("Unexpected create_task response structure: %s", j)
         return None
 
+    def create_chat(self, scope_id: str, contact_id: int, phone: Optional[str] = None, initial_message: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """
+        Create chat via /v2/origin/custom/{scope_id}/chats.
+        Signs request if AMO_CHAT_SECRET configured.
+        Returns parsed JSON or None.
+        """
+        if not scope_id:
+            logger.error("create_chat: scope_id missing")
+            return None
+
+        path = f"v2/origin/custom/{scope_id}/chats"
+        url = _full_url(path)
+        # build body; keep typical structure
+        body: Dict[str, Any] = {
+            "origin": {
+                "type": "contacts",
+                "id": int(contact_id)
+            }
+        }
+        # meta with phone and optional initial text
+        meta = {}
+        if phone:
+            meta["phone"] = phone
+        if initial_message:
+            meta["initial_message"] = initial_message
+        if meta:
+            body["meta"] = meta
+
+        # prepare headers
+        body_bytes = bytes(requests.utils.json.dumps(body), "utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "Date": formatdate(timeval=None, usegmt=True)
+        }
+
+        # compute Content-MD5
+        try:
+            md5_digest = hashlib.md5(body_bytes).digest()
+            content_md5 = base64.b64encode(md5_digest).decode()
+            headers["Content-MD5"] = content_md5
+        except Exception:
+            headers["Content-MD5"] = ""
+
+        # if we have chat secret, compute X-Signature
+        if AMO_CHAT_SECRET:
+            try:
+                method = "POST"
+                sign_string = "\n".join([method.upper(), headers.get("Date", ""), headers.get("Content-Type", ""), headers.get("Content-MD5", ""), f"/{path.lstrip('/')}"])
+                mac = hmac.new(AMO_CHAT_SECRET.encode("utf-8"), sign_string.encode("utf-8"), hashlib.sha1)
+                signature = mac.hexdigest()
+                headers["X-Signature"] = signature
+            except Exception:
+                logger.exception("Failed to compute X-Signature")
+        # Authorization header already present in session
+        try:
+            r = self.session.post(url, json=body, headers=headers, timeout=10)
+        except requests.RequestException:
+            logger.exception("Network error while creating chat")
+            return None
+
+        res = self._handle_response(r, expect_json=True)
+        if not res["ok"]:
+            logger.error("Create chat failed: status=%s body=%s", res["status"], res["text"][:1000])
+            # return debug info
+            return {"ok": False, "status": res["status"], "text": res["text"]}
+        return res.get("json") or {}
 
 # --- async wrappers (to not block event loop) ----------------
 async def find_contact_by_phone_async(phone: str) -> Optional[dict]:
@@ -245,10 +305,26 @@ async def create_task_async(text: str, entity_id: int, timestamp: int, entity_ty
         logger.exception("create_task_async failed")
         return None
 
+async def create_chat_async(scope_id: str, contact_id: int, phone: Optional[str] = None, initial_message: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Async wrapper for creating chat.
+    """
+    if not AMO_BASE_URL:
+        logger.error("AMO_BASE_URL not configured")
+        return None
+    def sync():
+        s = AmoCRMSession(AMO_BASE_URL, AMO_ACCESS_TOKEN)
+        return s.create_chat(scope_id=scope_id, contact_id=contact_id, phone=phone, initial_message=initial_message)
+    try:
+        return await asyncio.to_thread(sync)
+    except Exception:
+        logger.exception("create_chat_async failed")
+        return None
+
 async def find_or_create_contact_and_create_task_async(name: str, phone: str, tg_id: int, task_text: Optional[str] = None) -> Dict[str, Any]:
     """
     High-level helper: find contact by phone, if not found create contact, then create task.
-    Возвращает detailed dict с полями ok/reason/contact_id/task_id/created_contact
+    Returns detailed dict with ok/reason/contact_id/task_id/created_contact
     """
     result = {"ok": False, "reason": None, "contact_id": None, "task_id": None, "created_contact": False}
     try:
@@ -281,4 +357,58 @@ async def find_or_create_contact_and_create_task_async(name: str, phone: str, tg
         result["reason"] = str(e)
         return result
 
+# --- New high-level helper requested by user ----------------
+async def create_chat_and_task_for_invited_async(name: str, phone: str, inviter_tg_id: int, task_text: Optional[str] = None, initial_chat_message: Optional[str] = None) -> Dict[str, Any]:
+    out: Dict[str, Any] = {"ok": False, "contact_id": None, "chat": None, "task_id": None, "errors": []}
+    if not AMO_BASE_URL:
+        out["errors"].append("AMO_BASE_URL not configured")
+        return out
 
+    try:
+        # ensure contact exists
+        contact = await find_contact_by_phone_async(phone)
+        created_contact = False
+        if contact:
+            contact_id = int(contact.get("id"))
+        else:
+            contact_id = await create_contact_async(name=name or phone, phones=[phone], responsible_user_id=RESPONSIBLE_USER_ID or None)
+            created_contact = bool(contact_id)
+
+        if not contact_id:
+            out["errors"].append("contact_creation_failed")
+            return out
+
+        out["contact_id"] = contact_id
+    except Exception as e:
+        logger.exception("Error finding/creating contact")
+        out["errors"].append(f"contact_exception:{e}")
+        return out
+
+    # Try to create chat if scope configured
+    chat_res = None
+    if AMO_CHAT_SCOPE_ID:
+        try:
+            chat_res = await create_chat_async(scope_id=AMO_CHAT_SCOPE_ID, contact_id=int(contact_id), phone=phone, initial_message=initial_chat_message)
+            out["chat"] = chat_res
+        except Exception:
+            logger.exception("Error creating chat")
+            out["errors"].append("chat_creation_exception")
+    else:
+        logger.info("AMO_CHAT_SCOPE_ID not configured; skipping chat creation")
+        out["errors"].append("chat_scope_missing")
+
+    # Create task for the invited contact
+    try:
+        due_ts = int(time.time()) + 60 * 60 * 24
+        ttext = task_text or f"Действие по приглашённому: {name} ({phone})"
+        task_id = await create_task_async(text=ttext, entity_id=int(contact_id), timestamp=due_ts, entity_type='contacts')
+        if not task_id:
+            out["errors"].append("task_creation_failed")
+        else:
+            out["task_id"] = task_id
+    except Exception:
+        logger.exception("Error creating task for invited contact")
+        out["errors"].append("task_exception")
+
+    out["ok"] = True if out.get("contact_id") and (out.get("task_id") or out.get("chat")) else False
+    return out
