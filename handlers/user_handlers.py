@@ -55,9 +55,6 @@ EXTERNAL_SHEET_NAME = config('EXTERNAL_SHEET_NAME')
 
 @urouter.message(CommandStart())
 async def on_startup(message: Message, state: FSMContext):
-    """
-    On /start: ask user to choose language (question in Russian; language names in Russian).
-    """
     await state.clear()
     # language selection keyboard (labels are in Russian as requested)
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -73,9 +70,6 @@ async def on_startup(message: Message, state: FSMContext):
 
 @urouter.callback_query(F.data.startswith("lang_"))
 async def cb_set_language(call: CallbackQuery, state: FSMContext):
-    """
-    Handler for language choice buttons. Stores choice and continues flow.
-    """
     await call.answer()
     lang = call.data.split("_", 1)[1]  # 'ru', 'uz', 'tg', 'ky'
     user_id = call.from_user.id
@@ -97,7 +91,7 @@ async def cb_set_language(call: CallbackQuery, state: FSMContext):
         await call.message.answer(main_text, reply_markup=build_main_menu(lang))
     else:
         # ask for FIO in selected language
-        await call.message.answer(get_msg("invite_step_name", lang))
+        await call.message.answer(get_msg("get_name_text", lang))
         await state.set_state(RegState.FIO)
 
 
