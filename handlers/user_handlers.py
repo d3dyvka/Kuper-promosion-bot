@@ -1,7 +1,8 @@
+import asyncio
 import logging
-import time
+import datetime
 from aiogram import Router, F
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.types import CallbackQuery
 from aiogram.fsm.context import FSMContext
@@ -9,36 +10,49 @@ from aiogram.utils.formatting import PhoneNumber
 
 from create_bot import bot
 from db.crud import create_user, get_user_by_tg_id
-from jump.jump_integrations import get_balance_by_phone, create_withdrawal_transaction
+from jump.jump_integrations import get_balance_by_phone, perform_withdrawal
 from metabase.metabase_integration import get_completed_orders_by_phone, courier_exists, get_promotions
 from .user_states import RegState, InviteFriendStates, PromoStates, WithdrawStates
 from .services import (
-    load_json, contact_kb, check_user_in_sheet,
-    build_main_menu, build_invite_friend_menu,
-    build_promo_list, build_promo_details, contact_kb as contact_kb_func, manager_withdraw_kb, user_rejected_kb,
-    user_after_confirm_kb
+    load_json, contact_kb,
+    build_main_menu, build_invite_friend_menu, add_person_to_external_sheet
 )
 from amocrm.amocrm_integration import find_or_create_contact_and_create_task_async
 from decouple import config
+from loguru import logger
+
+import re
 
 urouter = Router()
-logger = logging.getLogger("user_handlers")
 
-# локальное хранилище pending-запросов
+# pending storage
 pending_actions = {}
 _local_counter = 0
+
+
 def _next_local():
     global _local_counter
     _local_counter += 1
     return f"local_{_local_counter}"
 
+
 MANAGER_CHAT_ID = config('MANAGER_CHAT_ID')
+EXTERNAL_SPREADSHEET_ID = config('EXTERNAL_SPREADSHEET_ID')
+EXTERNAL_SHEET_NAME = config('EXTERNAL_SHEET_NAME')
+
+
 @urouter.message(CommandStart())
 async def on_startup(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(load_json().get("hello_text", "Привет! Это бот Купера."))
-    await message.answer("Пожалуйста, напишите своё ФИО:")
-    await state.set_state(RegState.FIO)
+    user = await get_user_by_tg_id(message.from_user.id)
+    balance = get_balance_by_phone(user.phone) if user else 0
+    if user:
+        await message.answer(f"Главное меню:\n\nБаланс: {balance}\n\nЗаработано от приглашенных друзей: {None}",
+                             reply_markup=build_main_menu())
+    else:
+        await message.answer("Пожалуйста, напишите своё ФИО:")
+        await state.set_state(RegState.FIO)
 
 
 @urouter.message(RegState.FIO)
@@ -56,8 +70,19 @@ async def reg_contact(message: Message, state: FSMContext):
     contact = message.contact
     phone = contact.phone_number
     await state.update_data(phone=phone)
-    await message.answer(load_json().get("ask_city_text", "Спасибо. Укажите ваш город:"), reply_markup=ReplyKeyboardRemove())
+    await message.answer(load_json().get("ask_city_text", "Спасибо. Укажите ваш город:"),
+                         reply_markup=ReplyKeyboardRemove())
     await state.set_state(RegState.City)
+
+
+@urouter.message(Command("menu"))
+async def menu(message: Message, state: FSMContext):
+    await state.clear()
+    user = await get_user_by_tg_id(message.from_user.id)
+    balance = get_balance_by_phone(user.phone) if user else 0
+    if user:
+        await message.answer(f"Главное меню:\n\nБаланс: {balance}\n\nЗаработано от приглашенных друзей: {None}",
+                             reply_markup=build_main_menu())
 
 
 @urouter.message(RegState.City)
@@ -76,7 +101,6 @@ async def reg_courier_type(message: Message, state: FSMContext):
     city = data.get("city")
     tg_id = message.from_user.id
 
-    # валидация
     if not (name and phone and city):
         await message.answer("Неполные данные для проверки. Попробуйте /start ещё раз.")
         await state.clear()
@@ -88,31 +112,39 @@ async def reg_courier_type(message: Message, state: FSMContext):
     except Exception as e:
         logger.exception("Ошибка при проверке Google Sheets")
         res = {"found": False, "row": None, "error": str(e)}
-    if phone == "+79137619949" or "79137619949" or "89137619949":
-        res = True
+
+    # special bypass for admin phone
+    if phone and re.sub(r"\D+", "", phone).endswith("9137619949"):
+        res = {"found": True, "row": None, "error": None}
+
     if not res:
         await message.answer("Не удалось выполнить проверку (ошибка сервиса). Менеджер получит уведомление.")
         pid = _next_local()
-        pending_actions[pid] = {"telegram_id": tg_id, "name": name, "phone": phone, "city": city, "status": "error", "meta": res.get("error"), "type": "not_in_park"}
+        pending_actions[pid] = {"telegram_id": tg_id, "name": name, "phone": phone, "city": city, "status": "error",
+                                "meta": res.get("error"), "type": "not_in_park"}
         await state.clear()
         return
 
-    if res:
+    if res.get("found"):
         await create_user(data.get("name"), data.get("phone"), data.get("city"), message.from_user.id)
-        await message.answer("Главное меню:", reply_markup=build_main_menu())
+        balance = get_balance_by_phone(data.get("phone"))
+        await message.answer(f"Главное меню:\n\nБаланс: {balance}\n\nЗаработано от приглашенных друзей: {None}",
+                             reply_markup=build_main_menu())
         await state.clear()
         return
     else:
         await message.answer("Не нашли вас в нашем парке. Создаём задачу менеджеру.")
         try:
             task_text = f"Проверить кандидата {name} ({phone}), город: {city} — не найден в парке."
-            res_amo = await find_or_create_contact_and_create_task_async(name=name, phone=phone, tg_id=tg_id, task_text=task_text)
+            res_amo = await find_or_create_contact_and_create_task_async(name=name, phone=phone, tg_id=tg_id,
+                                                                         task_text=task_text)
         except Exception as e:
             logger.exception("AMO error")
             res_amo = {"ok": False, "reason": str(e)}
 
         pid = _next_local()
-        pending_actions[pid] = {"telegram_id": tg_id, "name": name, "phone": phone, "city": city, "status": "pending", "type": "not_in_park", "amo_result": res_amo}
+        pending_actions[pid] = {"telegram_id": tg_id, "name": name, "phone": phone, "city": city, "status": "pending",
+                                "type": "not_in_park", "amo_result": res_amo}
         if res_amo.get("ok"):
             logger.info(f"Задача создана в amoCRM. ID задачи: {res_amo.get('task_id')}.")
             await message.answer(f"Менеджер свяжется с вами. Ожидайте")
@@ -120,22 +152,12 @@ async def reg_courier_type(message: Message, state: FSMContext):
             await state.clear()
         return
 
-# ---------------- main menu callbacks ----------------
-@urouter.callback_query(F.data == "balance")
-async def cb_balance(call: CallbackQuery):
-    user = await get_user_by_tg_id(call.from_user.id)
-    await call.answer()
-    balance = get_balance_by_phone(user.phone)
-    await call.message.answer(f"Ваш баланс: {balance}")
-
 
 @urouter.callback_query(F.data == "completed_orders")
 async def cb_completed(call: CallbackQuery):
     user = await get_user_by_tg_id(call.from_user.id)
-    print(user)
     total_user_orders = get_completed_orders_by_phone(user.phone)
     await call.answer()
-
     await call.message.answer(f"Выполненных заказов: {total_user_orders}.")
 
 
@@ -149,17 +171,18 @@ async def cb_invited_friends(call: CallbackQuery):
     else:
         txt = "Список приглашённых:\n"
         for k, v in invited:
-            txt += f"- {v.get('friend_name','?')} (тел: {v.get('friend_phone','?')}), статус: {v.get('status')}\n"
+            txt += f"- {v.get('friend_name', '?')} (тел: {v.get('friend_phone', '?')}), статус: {v.get('status')}\n"
         await call.message.answer(txt)
 
 
-# ---------------- Invite friend flow ----------------
 @urouter.callback_query(F.data == "invite_friend")
 async def cb_invite_friend_start(call: CallbackQuery, state: FSMContext):
     await call.answer()
     await state.set_state(InviteFriendStates.friend_name)
-    await call.message.answer(load_json().get("invite_intro", "Пригласите друга — получите бонус."), reply_markup=build_invite_friend_menu())
+    await call.message.answer(load_json().get("invite_intro", "Пригласите друга — получите бонус."),
+                              reply_markup=build_invite_friend_menu())
     await call.message.answer(load_json().get("invite_step_name", "Отправьте ФИО приглашённого:"))
+    await state.set_state(InviteFriendStates.friend_name)
 
 
 @urouter.message(InviteFriendStates.friend_name)
@@ -173,21 +196,23 @@ async def invite_friend_name(message: Message, state: FSMContext):
 async def invite_friend_contact(message: Message, state: FSMContext):
     phone = message.text.strip()
     await state.update_data(friend_phone=phone)
-    await message.answer(load_json().get("invite_step_city", "Укажите город друга:"), reply_markup=ReplyKeyboardRemove())
+    await message.answer(load_json().get("invite_step_city", "Укажите город друга:"),
+                         reply_markup=ReplyKeyboardRemove())
     await state.set_state(InviteFriendStates.friend_city)
 
 
 @urouter.message(InviteFriendStates.friend_city)
 async def invite_friend_city(message: Message, state: FSMContext):
     await state.update_data(friend_city=message.text.strip())
-    await message.answer(load_json().get("invite_step_role", "Укажите роль (курьер/другое):"))
+    await message.answer(load_json().get("invite_step_role", "Укажите роль (пеший, вело, авто):"))
     await state.set_state(InviteFriendStates.friend_role)
 
 
 @urouter.message(InviteFriendStates.friend_role)
 async def invite_friend_role(message: Message, state: FSMContext):
     await state.update_data(friend_role=message.text.strip())
-    await message.answer(load_json().get("invite_step_birthday", "Укажите дату рождения приглашённого (ДД.MM.ГГГГ) или 'нет':"))
+    await message.answer(
+        load_json().get("invite_step_birthday", "Укажите дату рождения приглашённого (ДД.MM.ГГГГ):"))
     await state.set_state(InviteFriendStates.friend_birthday)
 
 
@@ -196,6 +221,7 @@ async def invite_friend_birthday(message: Message, state: FSMContext):
     await state.update_data(friend_birthday=message.text.strip())
     data = await state.get_data()
     inviter = message.from_user.id
+    user = await get_user_by_tg_id(inviter)
     name = data.get("friend_name")
     phone = data.get("friend_phone")
     city = data.get("friend_city")
@@ -203,10 +229,33 @@ async def invite_friend_birthday(message: Message, state: FSMContext):
 
     await message.answer("Создаю заявку менеджеру на приглашение друга...")
     try:
+        from .services import add_invite_friend_row
+        sheet_row = add_invite_friend_row(inviter_tg_id=inviter,
+                                          friend_name=name,
+                                          friend_phone=phone,
+                                          friend_tg_id=None,
+                                          inviter_name=user.fio,
+                                          inviter_phone=user.phone,
+                                          friend_city=city,
+                                          friend_role=role)
+    except Exception:
+        logger.exception("Ошибка записи в Google Sheets")
+        sheet_row = None
+
+    try:
+        ext_row = add_person_to_external_sheet(
+            spreadsheet_id=EXTERNAL_SPREADSHEET_ID,
+            sheet_name=EXTERNAL_SHEET_NAME,
+            fio=name,
+            phone=phone,
+            city=city,
+            role=role
+        )
         res = await find_or_create_contact_and_create_task_async(
             name=name, phone=phone, tg_id=inviter,
             task_text=f"Приглашённый: {name} {phone}. Роль: {role}, город: {city}"
         )
+
 
     except Exception as e:
         logger.exception("AMO error")
@@ -227,12 +276,9 @@ async def invite_friend_birthday(message: Message, state: FSMContext):
 
     if res.get("ok"):
         await message.answer(load_json().get("invite_done_text", "Спасибо! Мы создали заявку менеджеру."))
-        await message.answer(f"ID контакта: {res.get('contact_id')}\nID задачи: {res.get('task_id')}")
     else:
         await message.answer("Не удалось создать задачу в amoCRM. Создан локальный запрос менеджеру.")
-        await message.answer(f"ID локального запроса: {local_id}")
 
-    # Перевод в состояние ожидания подтверждения регистрации друга (для тестирования)
     await state.set_state(InviteFriendStates.friend_check)
     await message.answer("Ожидаем подтверждения региcтрации друга.")
     return
@@ -251,7 +297,8 @@ async def invite_friend_check_commands(message: Message, state: FSMContext):
                 await message.answer("Друг успешно зарегистрирован! Спасибо за приглашение.")
                 inviter = entry.get("inviter")
                 try:
-                    await bot.send_message(inviter, f"Ваш приглашённый {entry.get('friend_name')} успешно зарегистрирован.")
+                    await bot.send_message(inviter,
+                                           f"Ваш приглашённый {entry.get('friend_name')} успешно зарегистрирован.")
                 except Exception:
                     logger.exception("Can't notify inviter")
                 await state.clear()
@@ -265,278 +312,299 @@ async def invite_friend_check_commands(message: Message, state: FSMContext):
                 entry["status"] = "error"
                 entry["error"] = "registration_failed"
                 await message.answer("Регистрация друга не удалась. Ошибка: проблема с номером.")
-                await message.answer("Пожалуйста, попросите друга прислать правильный контакт или нажмите кнопку ниже, чтобы отправить новый контакт.", reply_markup=contact_kb())
+                await message.answer(
+                    "Пожалуйста, попросите друга прислать правильный контакт или нажмите кнопку ниже, чтобы отправить новый контакт.",
+                    reply_markup=contact_kb())
                 await state.update_data(retry_pid=pid)
                 await state.set_state(InviteFriendStates.friend_contact)
                 return
-    await message.answer("Ожидание подтверждения. Для теста используйте 'confirm_friend_registered {local_id}' или 'friend_registration_error {local_id}'.")
+    await message.answer(
+        "Ожидание подтверждения. Для теста используйте 'confirm_friend_registered {local_id}' или 'friend_registration_error {local_id}'.")
 
 
-# ---------------- promotions ----------------
+def _split_text_chunks(text: str, limit: int = 3900) -> list:
+    """
+    Разбивает длинный текст на части <= limit символов.
+    """
+    if not text:
+        return []
+    if len(text) <= limit:
+        return [text]
+    parts = []
+    paragraphs = text.split("\n\n")
+    current = ""
+    for p in paragraphs:
+        chunk = p + ("\n\n" if not p.endswith("\n\n") else "")
+        if len(current) + len(chunk) <= limit:
+            current += chunk
+            continue
+        if current:
+            parts.append(current.rstrip())
+        if len(chunk) > limit:
+            lines = chunk.split("\n")
+            cur2 = ""
+            for ln in lines:
+                ln_chunk = ln + "\n"
+                if len(cur2) + len(ln_chunk) <= limit:
+                    cur2 += ln_chunk
+                else:
+                    if cur2:
+                        parts.append(cur2.rstrip())
+                    cur2 = ln_chunk
+            if cur2:
+                parts.append(cur2.rstrip())
+            current = ""
+        else:
+            current = chunk
+    if current:
+        parts.append(current.rstrip())
+    return parts
+
+
 @urouter.callback_query(F.data == "promotions")
 async def cb_promotions(call: CallbackQuery, state: FSMContext):
     await call.answer()
-    PROMOTIONS = get_promotions()
-    if not PROMOTIONS:
-        await call.message.answer(load_json().get("promo_none", "Пока нет активных акций."))
+    user = await get_user_by_tg_id(call.from_user.id)
+    phone = user.phone if user else None
+    if not phone:
+        await call.message.answer("Не задан номер в профиле. Обновите, пожалуйста.")
         return
-    kb = build_promo_list(PROMOTIONS)
-    await state.set_state(PromoStates.viewing)
-    await call.message.answer(load_json().get("promo_list_intro", "Текущие акции:"), reply_markup=kb)
 
-
-@urouter.callback_query(F.data.startswith("promo_"))
-async def cb_promo_details(call: CallbackQuery, state: FSMContext):
-    await call.answer()
-    pid = call.data.split("_",1)[1]
-    promo = next((p for p in PROMOTIONS if p["id"] == pid), None)
-    if not promo:
-        await call.message.answer("Акция не найдена.")
+    try:
+        promos = await asyncio.to_thread(get_promotions, phone)
+    except Exception:
+        logger.exception("Error getting promotions")
+        await call.message.answer("Ошибка при получении акций. Попробуйте позже.")
         return
-    kb = build_promo_details(promo)
-    await call.message.answer(f"Акция: {promo['title']}\n\n{promo['desc']}", reply_markup=kb)
 
-
-@urouter.callback_query(F.data.startswith("promo_claim_"))
-async def cb_promo_claim(call: CallbackQuery, state: FSMContext):
-    await call.answer()
-    # parse id
-    pid = call.data.split("_",2)[2] if "_" in call.data else call.data.split("_",1)[1]
-    promo = next((p for p in PROMOTIONS if p["id"] == pid), None)
-    if not promo:
-        await call.message.answer("Акция не найдена.")
+    if not promos:
+        await call.message.answer("📭 Пока нет доступных акций.")
         return
-    tg = call.from_user.id
-    local_id = _next_local()
-    pending_actions[local_id] = {"telegram_id": tg, "promo_id": pid, "status": "claimed", "meta": promo, "type":"promo"}
-    await call.message.answer(load_json().get("promo_claim_done", "Вы успешно заявились на акцию. Менеджер свяжется с вами."))
-    await call.message.answer(f"ID запроса: {local_id}")
+
+    today = datetime.date.today()
+    # total completed orders for emoji determination
+    try:
+        total_orders = get_completed_orders_by_phone(phone)
+    except Exception:
+        total_orders = 0
+
+    lines = []
+    seen = set()
+
+    # iterate promos in returned order and build formatted lines
+    for promo in promos:
+        ptype = promo.get("type")
+        title = promo.get("title", "") or ""
+        desc = promo.get("desc", "") or ""
+        reward = promo.get("reward", "") or ""
+        meta = promo.get("meta") or {}
+
+        print(ptype)
+
+        if ptype == "refer":
+            # build refer line
+            base = title or "Приведи друга"
+            parts = [base]
+            if desc:
+                parts.append(desc)
+            if reward:
+                parts.append(f"Награда: {reward}")
+            line = " - ".join(parts)
+            if line not in seen:
+                seen.add(line)
+                lines.append(line)
+            continue
+
+        if ptype == "first":
+            base = title or "Первый заказ"
+            parts = [base]
+            if desc:
+                parts.append(desc)
+            if reward:
+                parts.append(f"Бонус: {reward}")
+            line = " - ".join(parts)
+            if line not in seen:
+                seen.add(line)
+                lines.append(line)
+            continue
+
+        if ptype == "completed":
+            # expected meta: threshold, end_date, coef_used, obj
+            th = meta.get("threshold") or meta.get("thresholds") or None
+            try:
+                th_int = int(th)
+            except Exception:
+                # maybe title contains number or promo id
+                try:
+                    th_int = int(str(title).split()[0])
+                except Exception:
+                    th_int = None
+            if th_int is None:
+                # fallback: include title text
+                line = f"{title} - {desc or '—'} - {reward} ₽"
+                if line not in seen:
+                    seen.add(line)
+                    lines.append(line)
+                continue
+
+            end_date_raw = meta.get("end_date") or meta.get("end_date_str") or None
+            end_date = None
+            if end_date_raw:
+                # many formats possible; try dd.mm.yyyy then iso
+                try:
+                    end_date = datetime.datetime.strptime(end_date_raw, "%d.%m.%Y").date()
+                    end_date_str = end_date.strftime("%d.%m.%Y")
+                except Exception:
+                    try:
+                        dt = datetime.datetime.fromisoformat(end_date_raw)
+                        end_date = dt.date()
+                        end_date_str = end_date.strftime("%d.%m.%Y")
+                    except Exception:
+                        end_date = None
+                        end_date_str = str(end_date_raw)
+            else:
+                end_date_str = "—"
+
+            # emoji logic
+            emoji = "⏳"  # default if no end_date
+            try:
+                if isinstance(total_orders, (int, float)) and total_orders >= th_int:
+                    emoji = "✅"
+                else:
+                    if end_date is None:
+                        emoji = "⏳"
+                    else:
+                        if end_date >= today:
+                            emoji = "⏳"
+                        else:
+                            emoji = "❌"
+            except Exception:
+                emoji = "⏳"
+
+            # reward numeric normalize
+            reward_str = str(reward).strip()
+            if reward_str == "":
+                reward_str = "0"
+            # ensure date formatted dd.mm.YYYY or —
+            line = f"{th_int} заказов - {end_date_str} - {reward_str} ₽ {emoji}"
+            if line not in seen:
+                seen.add(line)
+                lines.append(line)
+            continue
+
+        # fallback
+        base = title or "Акция"
+        parts = [base]
+        if desc:
+            parts.append(desc)
+        if reward:
+            parts.append(f"Награда: {reward}")
+        line = " - ".join(parts)
+        if line not in seen:
+            seen.add(line)
+            lines.append(line)
+
+    # prepare header + lines joined with blank line between
+    header = "📣 Доступные акции:\n\n"
+    # ensure each line on its own paragraph
+    body = "\n\n".join(lines)
+    full_text = header + body
+
+    # split into chunks safe for Telegram
+    chunks = _split_text_chunks(full_text, limit=3900)
+    kb_last = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="Вернуться в главное меню", callback_data="to_start")]])
+
+    try:
+        for i, ch in enumerate(chunks):
+            if i == len(chunks) - 1:
+                await call.message.answer(ch, reply_markup=kb_last)
+            else:
+                await call.message.answer(ch)
+        await state.set_state(PromoStates.viewing)
+    except Exception:
+        logger.exception("Failed to send promo chunks")
+        # fallback short message
+        try:
+            short = header + ("\n\n".join(lines[:20]))
+            await call.message.answer(short, reply_markup=kb_last)
+            await state.set_state(PromoStates.viewing)
+        except Exception:
+            await call.message.answer("Доступные акции (слишком длинное сообщение). Обратитесь в поддержку.",
+                                      reply_markup=kb_last)
+            await state.set_state(PromoStates.viewing)
 
 
-# ---------------- withdraw flow (skeleton) ----------------
 @urouter.callback_query(F.data == "withdraw")
 async def cb_withdraw_start(call: CallbackQuery, state: FSMContext):
     await call.answer()
-    await call.message.answer(
-        "Для вывода укажите сумму и реквизиты в формате:\n\n"
-        "<сумма> ; <реквизиты>\n\n"
-        "Пример: `1500; 4276 00** **** 1234`",
-        reply_markup=ReplyKeyboardRemove()
-    )
-    await state.set_state(WithdrawStates.ask_requisites)
+    await state.set_state(WithdrawStates.ask_amount)
+    await call.message.answer("Введите сумму для вывода (числом, в рублях):")
 
 
-
-@urouter.message(WithdrawStates.ask_requisites)
-async def withdraw_requisites(message: Message, state: FSMContext):
-    text = message.text.strip()
-    tg = message.from_user.id
-
-    if ";" in text:
-        parts = [p.strip() for p in text.split(";", 1)]
-    elif "\n" in text:
-        parts = [p.strip() for p in text.split("\n", 1)]
-    else:
-        await message.answer("Неверный формат. Пожалуйста, отправьте в формате `1500; номер_карты`.")
-        return
-
-    if len(parts) != 2:
-        await message.answer("Неверный формат. Пожалуйста, отправьте в формате `1500; номер_карты`.")
-        return
-
-    amount_raw, requisites = parts
-    try:
-        amount = float(amount_raw.replace(",", "."))
-        if amount <= 0:
-            raise ValueError()
-    except Exception:
-        await message.answer("Некорректная сумма. Укажите положительное число, например: 1500")
-        return
-
+@urouter.message(WithdrawStates.ask_amount)
+async def withdraw_enter_amount(message: Message, state: FSMContext):
     user = await get_user_by_tg_id(message.from_user.id)
-    user_name = user.fio
-    user_phone = user.phone
-    user_tg = message.from_user.username
-
+    if not user or not user.phone:
+        await message.answer("Нужен номер телефона в профиле. Обновите профиль.")
+        await state.clear()
+        return
+    text = message.text.strip().replace(",", ".")
     try:
-        current_balance = get_balance_by_phone(user_phone) if user_phone else None
-    except Exception as e:
-        logger.exception("Ошибка получения баланса")
-        current_balance = None
-
-    pid = _next_local()
-    pending_actions[pid] = {
-        "type": "withdraw",
-        "telegram_id": tg,
-        "phone": user_phone,
-        "username": user_tg,
-        "fio": user_name,
-        "amount": amount,
-        "requisites": requisites,
-        "status": "pending",
-        "created_at": time.time()
-    }
-
-    await message.answer("Заявка на вывод передана менеджеру. Ожидайте ответа.", reply_markup=ReplyKeyboardRemove())
-
-    mgr_text = (
-        "НОВАЯ ЗАЯВКА НА ВЫВОД\n\n"
-        f"Номер телефона: {user_phone or 'не указан'}\n"
-        f"Человек (telegram): @{user_tg} ({message.from_user.id})\n"
-        f"ФИО: {user_name}\n"
-        f"Сумма вывода: {amount}\n"
-        f"Реквизиты: {requisites}\n"
-        f"Текущий баланс: {current_balance if current_balance is not None else 'неизвестен'}\n\n"
-        f"ID заявки: {pid}"
-    )
-
-    try:
-        mgr_ids = MANAGER_CHAT_ID if isinstance(MANAGER_CHAT_ID, (list, tuple)) else [MANAGER_CHAT_ID]
-        for mid in mgr_ids:
-            await bot.send_message(chat_id=mid, text=mgr_text, reply_markup=manager_withdraw_kb(pid))
-        logger.info(f"Withdraw request {pid} sent to managers")
+        amount = float(re.sub(r"[^\d\.]", "", text))
     except Exception:
-        logger.exception("Не удалось отправить уведомление менеджеру")
-        pending_actions[pid]["status"] = "error_notify"
-        pending_actions[pid]["error"] = "notify_failed"
-
-    await state.set_state(WithdrawStates.confirm_withdraw)
-
-
-
-@urouter.callback_query(F.data.startswith("withdraw_confirm_"))
-async def manager_withdraw_confirm(call: CallbackQuery):
-    await call.answer()
-    pid = call.data.split("withdraw_confirm_", 1)[1]
-    entry = pending_actions.get(pid)
-    if not entry:
-        await call.message.answer("Заявка не найдена или уже обработана.")
+        await message.answer("Неверный формат суммы. Попробуйте ещё раз.")
         return
 
-    # ставим статус: подтверждается
-    entry["status"] = "confirmed_by_manager"
-    entry["manager_id"] = call.from_user.id
-    entry["manager_action_at"] = time.time()
-
+    # get balance to check minimum remain 50
+    balance = get_balance_by_phone(user.phone)
     try:
-        tx_res = create_withdrawal_transaction(phone=entry["phone"], amount=entry["amount"], requisites=entry["requisites"])
-        entry["tx_result"] = tx_res
-        entry["status"] = "withdraw_sent"
-        logger.info("Создана транзакция для %s: %s", pid, tx_res)
-    except Exception as e:
-        logger.exception("Ошибка при создании транзакции через Jump API")
-        entry["status"] = "withdraw_failed"
-        entry["error"] = str(e)
-        # уведомляем менеджера об ошибке
-        await call.message.answer(f"Ошибка при создании транзакции: {e}")
-        return
-
-    try:
-        user_id = entry["telegram_id"]
-        await call.bot.send_message(
-            chat_id=user_id,
-            text=(
-                "Ваш запрос на вывод обработан менеджером и отправлен на выплату.\n\n"
-                "Если деньги пришли — нажмите «Подтвердить вывод».\n"
-                "Если денег нет — нажмите «Вывод не пришёл», мы проверим."
-            ),
-            reply_markup=user_after_confirm_kb(pid)
-        )
+        bal = float(balance)
     except Exception:
-        logger.exception("Не удалось уведомить пользователя о созданной транзакции")
-
-    await call.message.answer("Выплата отправлена. Пользователь уведомлён.", show_alert=True)
-
-
-@urouter.callback_query(F.data.startswith("withdraw_reject_"))
-async def manager_withdraw_reject(call: CallbackQuery):
-    await call.answer()
-    pid = call.data.split("withdraw_reject_", 1)[1]
-    entry = pending_actions.get(pid)
-    if not entry:
-        await call.message.answer("Заявка не найдена или уже обработана.")
+        bal = 0.0
+    allowed = bal - 50.0
+    if amount > allowed:
+        await message.answer("Нельзя вывести больше. На счету должно остаться минимум 50 ₽.")
+        await state.clear()
         return
-
-    entry["status"] = "rejected_by_manager"
-    entry["manager_id"] = call.from_user.id
-    entry["manager_action_at"] = time.time()
 
     try:
-        user_id = entry["telegram_id"]
-        await call.bot.send_message(
-            chat_id=user_id,
-            text=(
-                "К сожалению, менеджер отклонил вашу заявку на вывод.\n\n"
-                "Если хотите — попробуйте ещё раз или свяжитесь с менеджером."
-            ),
-            reply_markup=user_rejected_kb()
-        )
+        res = await asyncio.to_thread(perform_withdrawal, phone=user.phone, amount=amount)
     except Exception:
-        logger.exception("Не удалось уведомить пользователя об отклонении")
-
-    await call.message.answer("Заявка отклонена.", show_alert=True)
-
-
-@urouter.callback_query(F.data.startswith("withdraw_user_confirmed_"))
-async def user_withdraw_confirmed(call: CallbackQuery):
-    await call.answer()
-    pid = call.data.split("withdraw_user_confirmed_", 1)[1]
-    entry = pending_actions.get(pid)
-    if not entry:
-        await call.message.answer("Заявка не найдена.")
+        logger.exception("Withdrawal error")
+        await message.answer("Ошибка при попытке вывода. Попробуйте позже.")
+        await state.clear()
         return
 
-    entry["status"] = "user_confirmed_received"
-    entry["user_confirmed_at"] = time.time()
-
-    await call.message.answer("Спасибо! Выплата подтверждена. Возвращаемся в главное меню.", reply_markup=build_main_menu())
-    # можно сохранять транзакцию в БД здесь через db.crud
-
-
-@urouter.callback_query(F.data.startswith("withdraw_user_not_received_"))
-async def user_withdraw_not_received(call: CallbackQuery):
-    await call.answer()
-    pid = call.data.split("withdraw_user_not_received_", 1)[1]
-    entry = pending_actions.get(pid)
-    if not entry:
-        await call.message.answer("Заявка не найдена.")
+    if not res.get("ok"):
+        reason = res.get("reason")
+        if reason == "insufficient_after_minimum":
+            await message.answer("На вашем счёте недостаточно средств.")
+        else:
+            await message.answer(f"Не удалось создать выплату: {reason}")
+        await state.clear()
         return
 
-    entry["status"] = "user_reported_not_received"
-    entry["user_reported_at"] = time.time()
-
-    # уведомление менеджеру
-    mgr_ids = MANAGER_CHAT_ID if isinstance(MANAGER_CHAT_ID, (list, tuple)) else [MANAGER_CHAT_ID]
-    notify_text = (
-        "Пользователь сообщил, что выплата не пришла!\n\n"
-        f"ID заявки: {pid}\n"
-        f"Номер: {entry.get('phone')}\n"
-        f"Сумма: {entry.get('amount')}\n"
-        f"Реквизиты: {entry.get('requisites')}\n"
-        f"Юзер (tg): @{entry.get('username')} ({entry.get('telegram_id')})\n"
-    )
-    for mid in mgr_ids:
-        try:
-            await call.bot.send_message(chat_id=mid, text=notify_text)
-        except Exception:
-            logger.exception("Не удалось уведомить менеджера о неполученной выплате")
-
-    await call.message.answer("Спасибо, менеджер получил уведомление и свяжется с вами.", reply_markup=build_main_menu())
+    amount_sent = res.get("amount_sent") or amount
+    await message.answer(
+        f"Запрос на выплату создан.\nСумма: {amount_sent:.2f} ₽\nСтатус: создана, менеджер подтвердит.",
+        reply_markup=build_main_menu())
+    await state.clear()
 
 
-
-# ---------- helper callbacks ----------
 @urouter.callback_query(F.data == "to_start")
 async def cb_to_start(call: CallbackQuery):
     await call.answer()
-    invited_count = sum(1 for p in pending_actions.values() if p.get("type")=="invite" and p.get("inviter")==call.from_user.id)
-    await call.message.answer("Главное меню", reply_markup=build_main_menu())
+    user = await get_user_by_tg_id(call.from_user.id)
+    balance = get_balance_by_phone(user.phone) if user else 0
+    await call.message.answer(f"Главное меню:\n\nБаланс: {balance}\n\nЗаработано от приглашенных друзей: {None}",
+                              reply_markup=build_main_menu())
 
 
 @urouter.callback_query(F.data == "contact_manager")
 async def cb_contact_manager(call: CallbackQuery):
     await call.answer()
-    await call.message.answer("Контакты менеджера: +7 900 000-00-00 (Telegram: @manager).")
+    await call.message.answer("Контакты менеджера: +7 499 999 01 25 (Telegram: @RegKuper).")
 
 
 # debug util

@@ -298,23 +298,3 @@ def get_promotions(phone: str, timeout: int = 15) -> List[Dict[str, Any]]:
         deduped.append(r)
 
     return deduped
-
-def get_date_lead(phone_number: str, timeout=15):
-    try:
-        token = update_metabase_token()
-        url = f"{BASE}/api/card/{CARD_ID}/query/json"
-        headers = {"X-Metabase-Session": token, "Content-Type": "application/json"}
-        payload = {"parameters": [], "ignore_cache": True}
-        resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
-        resp.raise_for_status()
-        data = resp.json()
-        for obj in data:
-            if not match_by_phone(obj.get("Телефон"), phone_number):
-                continue
-            dt_lead = _parse_date_lead(data.get("Дата лида"))
-            if dt_lead:
-                return dt_lead
-            else:
-                return None
-    except Exception as e:
-        logger.exception("Error getting date lead")
