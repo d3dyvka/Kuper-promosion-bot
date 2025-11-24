@@ -51,11 +51,6 @@ EXTERNAL_SHEET_NAME = config('EXTERNAL_SHEET_NAME')
 
 @urouter.message(CommandStart())
 async def on_startup(message: Message, state: FSMContext):
-    """
-    Первый экран: выбор языка. Всё настраивается через локализацию.
-    Отправляем промпт на русском (как просили) — но при этом тексты
-    вынесены в config.json и доступны на всех языках.
-    """
     await state.clear()
     # используем русский вариант, потому что это первый шаг (пока не выбран язык)
     prompt = get_msg("choose_language_prompt", "ru")
@@ -93,24 +88,6 @@ async def cb_set_language(call: CallbackQuery, state: FSMContext):
     else:
         # ask for FIO in selected language
         await call.message.answer(get_msg("get_name_text", lang))
-        await state.set_state(RegState.FIO)
-
-
-# --- note: original repo contained a duplicate on_startup; we keep it (logic preserved)
-@urouter.message(CommandStart())
-async def on_startup_old(message: Message, state: FSMContext):
-    # keep older behaviour but use translations based on stored language (if any)
-    await state.clear()
-    lang = _get_lang_for_user(message.from_user.id)
-    # send hello (falls back to Russian internally if translation missing)
-    await message.answer(get_msg("hello_text", lang))
-    user = await get_user_by_tg_id(message.from_user.id)
-    balance = get_balance_by_phone(user.phone) if user else 0
-    if user:
-        main_text = get_msg("main_menu_text", lang, bal=balance, date=get_date_lead(user.phone) or "—", invited=None)
-        await message.answer(main_text, reply_markup=build_main_menu(lang))
-    else:
-        await message.answer(get_msg("get_name_text", lang))
         await state.set_state(RegState.FIO)
 
 
