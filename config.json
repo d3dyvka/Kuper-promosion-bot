@@ -443,7 +443,7 @@
     "tg": "Маълумот ба ҷадвал илова намешавад.",
     "ky": "Маалымат таблицага жазылып калган жок."
   },
-    "withdraw_choose_method": {
+  "withdraw_choose_method": {
     "ru": "Куда вывести средства? Выберите способ:",
     "uz": "Pulni qayerga chiqarish kerak? Usulni tanlang:",
     "tg": "Куҷо маблағро барорем? Усулро интихоб кунед:",
@@ -526,6 +526,12 @@
     "uz": "Chiqim #{pid} bajarilmadi. Sabab: {reason}",
     "tg": "Баровардани #{pid} иҷро нашуд. Сабаб: {reason}",
     "ky": "Чыгаруу #{pid} аткарылбады. Себеп: {reason}"
+  },
+  "checking_in_park": {
+    "ru": "Проверяю вас на наличие в нашем парке...",
+    "uz": "Sizning bizning parkimizda mavjudligingizni tekshirmoqdaman...",
+    "tg": "Ман мавҷудияти шуморо дар боғи мо тафтиш мекунам...",
+    "ky": "Сиздин биздин паркте бар же жок экениңизди текшерип жатам..."
   },
   "withdraw_success_user": {
     "ru": "Выплата подтверждена и выполнена. Сумма: {amount_sent:.2f} ₽.",
