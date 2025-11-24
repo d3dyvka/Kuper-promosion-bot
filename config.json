@@ -442,5 +442,107 @@
     "uz": "Ma'lumotlarni jadvalga yozib bo'lmadi.",
     "tg": "Маълумот ба ҷадвал илова намешавад.",
     "ky": "Маалымат таблицага жазылып калган жок."
+  },
+    "withdraw_choose_method": {
+    "ru": "Куда вывести средства? Выберите способ:",
+    "uz": "Pulni qayerga chiqarish kerak? Usulni tanlang:",
+    "tg": "Куҷо маблағро барорем? Усулро интихоб кунед:",
+    "ky": "Акчаны кайсы жакка чыгаруу керек? ыкманы тандаңыз:"
+  },
+  "withdraw_method_card": {
+    "ru": "Карта",
+    "uz": "Karta",
+    "tg": "Карта",
+    "ky": "Карта"
+  },
+  "withdraw_method_sbp": {
+    "ru": "СБП",
+    "uz": "SBP",
+    "tg": "СБП",
+    "ky": "СБП"
+  },
+  "ask_card_number": {
+    "ru": "Введите номер карты (без пробелов):",
+    "uz": "Karta raqamini kiriting (bo'shliqsiz):",
+    "tg": "Рақами картаро ворид кунед (бо фосила набошад):",
+    "ky": "Карта номерин киргизиңиз (босостсуз):"
+  },
+  "ask_card_number_invalid": {
+    "ru": "Неверный номер карты. Попробуйте ещё раз.",
+    "uz": "Karta raqami noto'g'ri. Qayta urinib ko'ring.",
+    "tg": "Рақами корти нодуруст. Боз кӯшиш кунед.",
+    "ky": "Карта номери туура эмес. Такай аракет кылыңыз."
+  },
+  "ask_sbp_phone": {
+    "ru": "Введите номер телефона для СБП (пример: +7XXXXXXXXXX):",
+    "uz": "SBP uchun telefon raqamini kiriting (masalan: +7XXXXXXXXXX):",
+    "tg": "Рақами телефон барои СБПро ворид кунед (масалан: +7XXXXXXXXXX):",
+    "ky": "СБП үчүн телефон номерин киргизиңиз (мисал: +7XXXXXXXXXX):"
+  },
+  "ask_sbp_phone_invalid": {
+    "ru": "Неверный формат телефона. Попробуйте ещё раз.",
+    "uz": "Telefon formati noto'g'ri. Qayta urinib ko'ring.",
+    "tg": "Формати телефон нодуруст. Боз кӯшиш кунед.",
+    "ky": "Телефон форматы туура эмес. Кайра аракет кылыңыз."
+  },
+  "ask_sbp_bank": {
+    "ru": "Введите название банка (для СБП):",
+    "uz": "Bank nomini kiriting (SBP uchun):",
+    "tg": "Номи бонкро ворид кунед (барои СБП):",
+    "ky": "Банк атын киргизиңиз (СБП үчүн):"
+  },
+  "ask_sbp_bank_invalid": {
+    "ru": "Неверное название банка. Попробуйте ещё раз.",
+    "uz": "Bank nomi noto'g'ri. Qayta urinib ko'ring.",
+    "tg": "Номи бонк нодуруст аст. Боз кӯшиш кунед.",
+    "ky": "Банк аты туура эмес. Кайра аракет кылыңыз."
+  },
+  "withdraw_request_sent_to_manager": {
+    "ru": "Заявка отправлена менеджеру на подтверждение. Ожидайте ответа.",
+    "uz": "Ariza menejerga tasdiqlash uchun yuborildi. Javob kuting.",
+    "tg": "Дархост ба мудир барои тасдиқ фиристода шуд. Интизори посух шавед.",
+    "ky": "Сураныч менеджерге жиберилди. Жоопту күтүңүз."
+  },
+  "manager_withdraw_request_text": {
+    "ru": "Заявка вывода #{pid}\nПользователь: {user_name} (TG: {user_tg})\nСумма: {amount} ₽\nСпособ: {method}\n{card}{sbp_phone}{sbp_bank}\n\nПодтвердите / отклоните заявку.",
+    "uz": "Chiqim arizasi #{pid}\nFoydalanuvchi: {user_name} (TG: {user_tg})\nMiqdor: {amount} ₽\nUsul: {method}\n{card}{sbp_phone}{sbp_bank}\n\nIltimos tasdiqlang yoki rad eting.",
+    "tg": "Дархости баровардан #{pid}\nИстифодабаранда: {user_name} (TG: {user_tg})\nМаблағ: {amount} ₽\nУсул: {method}\n{card}{sbp_phone}{sbp_bank}\n\nЛутфан тасдиқ ё рад кунед.",
+    "ky": "Чыгаруу өтүнүчү #{pid}\nКолдонучу: {user_name} (TG: {user_tg})\nСумма: {amount} ₽\nЫкма: {method}\n{card}{sbp_phone}{sbp_bank}\n\nСураныч, тастыктаңыз же кайтарыңыз."
+  },
+  "manager_started_withdraw": {
+    "ru": "Запускаю выполнение заявки #{pid}...",
+    "uz": "Ariza #{pid} bajarilmoqda...",
+    "tg": "Дархост #{pid} иҷро мешавад...",
+    "ky": "Өтүнүч #{pid} ишке кирди..."
+  },
+  "manager_withdraw_done": {
+    "ru": "Вывод #{pid} выполнен (посмотрите детали в сообщении).",
+    "uz": "Chiqim #{pid} bajarildi (батафсил хабарда).",
+    "tg": "Баровардани #{pid} анҷом шуд (тафсилот дар паём).",
+    "ky": "Чыгаруу #{pid} аткарылды (маалыматты билдирүүдө)."
+  },
+  "manager_withdraw_failed": {
+    "ru": "Вывод #{pid} не выполнен. Причина: {reason}",
+    "uz": "Chiqim #{pid} bajarilmadi. Sabab: {reason}",
+    "tg": "Баровардани #{pid} иҷро нашуд. Сабаб: {reason}",
+    "ky": "Чыгаруу #{pid} аткарылбады. Себеп: {reason}"
+  },
+  "withdraw_success_user": {
+    "ru": "Выплата подтверждена и выполнена. Сумма: {amount_sent:.2f} ₽.",
+    "uz": "To'lov tasdiqlandi va bajarildi. Miqdor: {amount_sent:.2f} ₽.",
+    "tg": "Пардохт тасдиқ ва иҷро шуд. Маблағ: {amount_sent:.2f} ₽.",
+    "ky": "Төлөө тастыкталып, аткарылды. Сумма: {amount_sent:.2f} ₽."
+  },
+  "withdraw_failed_user": {
+    "ru": "К сожалению, вывод не выполнен. Причина: {reason}",
+    "uz": "Afsuski, chiqim bajarilmadi. Sabab: {reason}",
+    "tg": "Мутаассифона, баровардан иҷро нашуд. Сабаб: {reason}",
+    "ky": "Тилим, чыгаруу аткарылбады. Себеп: {reason}"
+  },
+  "withdraw_rejected_user": {
+    "ru": "Ваш запрос на вывод отклонён менеджером.",
+    "uz": "Sizning chiqim so'rovingiz menejer tomonidan rad qilindi.",
+    "tg": "Дархости шумо барои баровардан аз тарафи мудир рад шуд.",
+    "ky": "Сиздин чыгару өтүнүчүңүз менеджер тарабынан четке кагылды."
   }
 }

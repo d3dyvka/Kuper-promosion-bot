@@ -11,11 +11,12 @@ from aiogram.utils.formatting import PhoneNumber
 from create_bot import bot
 from db.crud import create_user, get_user_by_tg_id
 from jump.jump_integrations import get_balance_by_phone, perform_withdrawal
-from metabase.metabase_integration import get_completed_orders_by_phone, courier_exists, get_promotions, get_date_lead
+from metabase.metabase_integration import get_completed_orders_by_phone, courier_exists, get_promotions, get_date_lead, \
+    compute_referral_commissions_for_inviter
 from .user_states import RegState, InviteFriendStates, PromoStates, WithdrawStates
 from .services import (
     load_json, contact_kb,
-    build_main_menu, build_invite_friend_menu, add_person_to_external_sheet, get_msg
+    build_main_menu, build_invite_friend_menu, add_person_to_external_sheet, get_msg, manager_withdraw_kb
 )
 from amocrm.amocrm_integration import find_or_create_contact_and_create_task_async
 from decouple import config
@@ -83,7 +84,7 @@ async def cb_set_language(call: CallbackQuery, state: FSMContext):
         balance = get_balance_by_phone(user.phone) if user else 0
         date = get_date_lead(user.phone) if user and getattr(user, "phone", None) else None
         # build_main_menu may accept lang in your services implementation
-        main_text = get_msg("main_menu_text", lang, bal=balance, date=date or "0", invited=None)
+        main_text = get_msg("main_menu_text", lang, bal=balance, date=date or "0", invited=compute_referral_commissions_for_inviter(user.phone))
         await call.message.answer(main_text, reply_markup=build_main_menu(lang))
     else:
         # ask for FIO in selected language
@@ -120,7 +121,7 @@ async def menu(message: Message, state: FSMContext):
     user = await get_user_by_tg_id(message.from_user.id)
     balance = get_balance_by_phone(user.phone) if user else 0
     if user:
-        main_text = get_msg("main_menu_text", lang, bal=balance, date=get_date_lead(user.phone) or "—", invited=None)
+        main_text = get_msg("main_menu_text", lang, bal=balance, date=get_date_lead(user.phone) or "0", invited=compute_referral_commissions_for_inviter(user.phone))
         await message.answer(main_text, reply_markup=build_main_menu(lang))
 
 
@@ -169,7 +170,7 @@ async def reg_courier_type(message: Message, state: FSMContext):
     if res.get("found"):
         await create_user(data.get("name"), data.get("phone"), data.get("city"), message.from_user.id)
         balance = get_balance_by_phone(data.get("phone"))
-        main_text = get_msg("main_menu_text", lang, bal=balance, date=get_date_lead(phone) or "—", invited=None)
+        main_text = get_msg("main_menu_text", lang, bal=balance, date=get_date_lead(phone) or "0", invited=compute_referral_commissions_for_inviter(phone))
         await message.answer(main_text,
                              reply_markup=build_main_menu(lang))
         await state.clear()
@@ -620,29 +621,225 @@ async def withdraw_enter_amount(message: Message, state: FSMContext):
         await state.clear()
         return
 
+    # Сохраняем сумму и предлагаем выбрать способ (СБП / Карта)
+    await state.update_data(withdraw_amount=amount)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=get_msg("withdraw_method_card", lang), callback_data="withdraw_method_card"),
+         InlineKeyboardButton(text=get_msg("withdraw_method_sbp", lang), callback_data="withdraw_method_sbp")]
+    ])
+    await state.set_state(WithdrawStates.choose_method)
+    await message.answer(get_msg("withdraw_choose_method", lang), reply_markup=kb)
+
+
+@urouter.callback_query(F.data == "withdraw_method_card")
+async def cb_withdraw_method_card(call: CallbackQuery, state: FSMContext):
+    lang = _get_lang_for_user(call.from_user.id)
+    await call.answer()
+    await state.set_state(WithdrawStates.card_number)
+    await call.message.answer(get_msg("ask_card_number", lang))
+
+
+@urouter.callback_query(F.data == "withdraw_method_sbp")
+async def cb_withdraw_method_sbp(call: CallbackQuery, state: FSMContext):
+    lang = _get_lang_for_user(call.from_user.id)
+    await call.answer()
+    await state.set_state(WithdrawStates.sbp_phone)
+    await call.message.answer(get_msg("ask_sbp_phone", lang))
+
+
+@urouter.message(WithdrawStates.card_number)
+async def withdraw_card_number_enter(message: Message, state: FSMContext):
+    lang = _get_lang_for_user(message.from_user.id)
+    card = re.sub(r"\s+", "", message.text.strip())
+    # minimal validation: digits and length 13-19
+    digits = re.sub(r"\D+", "", card)
+    if not (13 <= len(digits) <= 19):
+        await message.answer(get_msg("ask_card_number_invalid", lang))
+        return
+    await state.update_data(withdraw_method="card", card_number=digits)
+    data = await state.get_data()
+    amount = data.get("withdraw_amount")
+    # создаём локальную заявку менеджеру
+    pid = _next_local()
+    user = await get_user_by_tg_id(message.from_user.id)
+    pending_actions[pid] = {
+        "type": "withdraw",
+        "user_id": message.from_user.id,
+        "user_phone": user.phone if user else None,
+        "amount": amount,
+        "method": "card",
+        "card_number": digits,
+        "status": "pending",
+        "created_at": datetime.datetime.utcnow().isoformat()
+    }
+    manager_text = (
+        f"Заявка вывода #{pid}\n"
+        f"Пользователь: {(user.fio if user and getattr(user, "fio", None) else str(message.from_user.id))} (TG: {message.from_user.id})\n"
+        f"Сумма: {amount} ₽\n"
+        f"Способ: Карта \n"
+        f"{digits}\n"
+        "\nПодтвердите / отклоните заявку."
+    )
     try:
-        res = await asyncio.to_thread(perform_withdrawal, phone=user.phone, amount=amount)
+        await bot.send_message(int(MANAGER_CHAT_ID), manager_text, reply_markup=manager_withdraw_kb(pid))
     except Exception:
-        logger.exception("Withdrawal error")
-        await message.answer(get_msg("withdrawal_attempt_error", lang))
-        await state.clear()
+        logger.exception("Failed to notify manager about withdrawal request")
+    await message.answer(get_msg("withdraw_request_sent_to_manager", lang))
+    await state.set_state(WithdrawStates.awaiting_manager)
+
+
+@urouter.message(WithdrawStates.sbp_phone)
+async def withdraw_sbp_phone_enter(message: Message, state: FSMContext):
+    lang = _get_lang_for_user(message.from_user.id)
+    phone = re.sub(r"\D+", "", message.text.strip())
+    if len(phone) < 7:
+        await message.answer(get_msg("ask_sbp_phone_invalid", lang))
+        return
+    await state.update_data(withdraw_method="sbp", sbp_phone=phone)
+    await state.set_state(WithdrawStates.sbp_bank)
+    await message.answer(get_msg("ask_sbp_bank", lang))
+
+
+@urouter.message(WithdrawStates.sbp_bank)
+async def withdraw_sbp_bank_enter(message: Message, state: FSMContext):
+    lang = _get_lang_for_user(message.from_user.id)
+    bank = message.text.strip()
+    if not bank:
+        await message.answer(get_msg("ask_sbp_bank_invalid", lang))
+        return
+    await state.update_data(sbp_bank=bank)
+    data = await state.get_data()
+    amount = data.get("withdraw_amount")
+    sbp_phone = data.get("sbp_phone")
+    # создаём локальную заявку менеджеру
+    pid = _next_local()
+    user = await get_user_by_tg_id(message.from_user.id)
+    pending_actions[pid] = {
+        "type": "withdraw",
+        "user_id": message.from_user.id,
+        "user_phone": user.phone if user else None,
+        "amount": amount,
+        "method": "sbp",
+        "sbp_phone": sbp_phone,
+        "sbp_bank": bank,
+        "status": "pending",
+        "created_at": datetime.datetime.utcnow().isoformat()
+    }
+    # уведомляем менеджера (русский язык для менеджера)
+
+    manager_text = (
+        f"Заявка вывода #{pid}\n"
+        f"Пользователь: {(user.fio if user and getattr(user, "fio", None) else str(message.from_user.id))} (TG: {message.from_user.id})\n"
+        f"Сумма: {amount} ₽\n"
+        f"Способ: СБП \n"
+        f"{sbp_phone}{bank}\n"
+        "\nПодтвердите / отклоните заявку."
+    )
+    try:
+        await bot.send_message(int(MANAGER_CHAT_ID), manager_text, reply_markup=manager_withdraw_kb(pid))
+    except Exception:
+        logger.exception("Failed to notify manager about withdrawal request")
+    await message.answer(get_msg("withdraw_request_sent_to_manager", lang))
+    await state.set_state(WithdrawStates.awaiting_manager)
+
+
+# Менеджер подтверждает / отклоняет (кнопки приходят на MANAGER_CHAT_ID)
+@urouter.callback_query(F.data.startswith("withdraw_confirm_"))
+async def cb_manager_confirm_withdraw(call: CallbackQuery):
+    await call.answer()
+    # разрешаем подтверждать только менеджеру (жёсткая проверка)
+    try:
+        if str(call.from_user.id) != str(MANAGER_CHAT_ID):
+            await call.message.answer("Нет прав для подтверждения операции.")
+            return
+    except Exception:
+        pass
+
+    pid = call.data.split("withdraw_confirm_", 1)[1]
+    entry = pending_actions.get(pid)
+    if not entry or entry.get("type") != "withdraw":
+        await call.message.answer("Заявка не найдена или уже обработана.")
         return
 
-    if not res.get("ok"):
-        reason = res.get("reason")
-        if reason == "insufficient_after_minimum":
-            await message.answer(get_msg("withdrawal_insufficient", lang))
+    # Помечаем как approved, запускаем API-вывод
+    entry["status"] = "approved"
+    entry["manager_id"] = call.from_user.id
+    # Подготавливаем параметры вызова perform_withdrawal
+    user_phone_for_api = entry.get("user_phone")
+    amount = entry.get("amount")
+    method = entry.get("method")
+    # уведомляем менеджера, что выполняем
+    await call.message.answer(get_msg("manager_started_withdraw", "ru", pid=pid))
+    # выполняем вывод в отдельном потоке
+    try:
+        if method == "card":
+            card = entry.get("card_number")
+            res = await asyncio.to_thread(perform_withdrawal, phone=user_phone_for_api, amount=amount, card_number=card)
         else:
-            await message.answer(get_msg("withdrawal_create_failed", lang, reason=reason))
-        await state.clear()
+            # sbp
+            sbp_phone = entry.get("sbp_phone")
+            sbp_bank = entry.get("sbp_bank")
+            res = await asyncio.to_thread(perform_withdrawal, phone=user_phone_for_api, amount=amount, phone_hint=sbp_phone, bank_hint=sbp_bank)
+    except Exception as e:
+        logger.exception("Error performing withdrawal for pid %s", pid)
+        res = {"ok": False, "reason": "exception", "error": str(e)}
+
+    # уведомляем менеджера и пользователя о результате
+    entry["api_result"] = res
+    if res.get("ok"):
+        entry["status"] = "done"
+        # уведомляем пользователя
+        try:
+            user_id = entry.get("user_id")
+            user_lang = _get_lang_for_user(user_id)
+            await bot.send_message(user_id, get_msg("withdraw_success_user", user_lang, amount_sent=float(res.get("amount_sent", amount))))
+        except Exception:
+            logger.exception("Can't notify user about successful withdrawal")
+        await call.message.answer(get_msg("manager_withdraw_done", "ru", pid=pid))
+    else:
+        entry["status"] = "failed"
+        reason = res.get("reason") or res.get("error") or "unknown"
+        try:
+            user_id = entry.get("user_id")
+            user_lang = _get_lang_for_user(user_id)
+            await bot.send_message(user_id, get_msg("withdraw_failed_user", user_lang, reason=reason))
+        except Exception:
+            logger.exception("Can't notify user about failed withdrawal")
+        await call.message.answer(get_msg("manager_withdraw_failed", "ru", pid=pid, reason=reason))
+
+    # опционально: показываем менеджеру raw result
+    try:
+        await call.message.answer(f"API result: {str(res)[:1500]}")
+    except Exception:
+        pass
+
+
+@urouter.callback_query(F.data.startswith("withdraw_reject_"))
+async def cb_manager_reject_withdraw(call: CallbackQuery):
+    await call.answer()
+    try:
+        if str(call.from_user.id) != str(MANAGER_CHAT_ID):
+            await call.message.answer("Нет прав для отклонения операции.")
+            return
+    except Exception:
+        pass
+
+    pid = call.data.split("withdraw_reject_", 1)[1]
+    entry = pending_actions.get(pid)
+    if not entry or entry.get("type") != "withdraw":
+        await call.message.answer("Заявка не найдена или уже обработана.")
         return
 
-    amount_sent = res.get("amount_sent") or amount
-    await message.answer(
-        get_msg("withgrawal_request", lang, amount_sent=float(amount_sent)),
-        reply_markup=build_main_menu(lang))
-    await state.clear()
-
+    entry["status"] = "rejected"
+    entry["manager_id"] = call.from_user.id
+    # уведомляем пользователя
+    try:
+        user_id = entry.get("user_id")
+        user_lang = _get_lang_for_user(user_id)
+        await bot.send_message(user_id, get_msg("withdraw_rejected_user", user_lang))
+    except Exception:
+        logger.exception("Can't notify user about rejected withdrawal")
+    await call.message.answer(get_msg("manager_withdraw_rejected", "ru", pid=pid))
 
 @urouter.callback_query(F.data == "to_start")
 async def cb_to_start(call: CallbackQuery):
@@ -650,7 +847,7 @@ async def cb_to_start(call: CallbackQuery):
     await call.answer()
     user = await get_user_by_tg_id(call.from_user.id)
     balance = get_balance_by_phone(user.phone) if user else 0
-    main_text = get_msg("main_menu_text", lang, bal=balance, date=get_date_lead(user.phone) if user else "—", invited=None)
+    main_text = get_msg("main_menu_text", lang, bal=balance, date=get_date_lead(user.phone) if user else "0", invited=compute_referral_commissions_for_inviter(user.phone))
     await call.message.answer(main_text, reply_markup=build_main_menu(lang))
 
 

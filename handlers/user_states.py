@@ -1,3 +1,4 @@
+# user_states.py
 from aiogram.fsm.state import StatesGroup, State
 
 class RegState(StatesGroup):
@@ -12,17 +13,15 @@ class InviteFriendStates(StatesGroup):
     friend_city = State()
     friend_role = State()
     friend_birthday = State()
-    friend_check = State()  # ожидание подтверждения регистрации друга
+    friend_check = State()
 
 class PromoStates(StatesGroup):
     viewing = State()
-    claiming = State()
 
-# Заменить/дополнить существующие состояния
 class WithdrawStates(StatesGroup):
-    choose_method = State()    # выбрать метод выплаты
-    ask_amount = State()       # ввести сумму вывода
-    sbp_phone = State()        # ввести телефон SBP
-    sbp_bank = State()        # ввести банк SBP
-    card_number = State()      # ввести номер карты
-    confirm_withdraw = State() # ожидание подтверждения менеджера
+    ask_amount = State()
+    choose_method = State()
+    card_number = State()
+    sbp_phone = State()
+    sbp_bank = State()
+    awaiting_manager = State()

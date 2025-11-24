@@ -1,6 +1,8 @@
 import datetime
 import uuid
 import re
+from decimal import Decimal
+
 import requests
 import logging
 from typing import List, Dict, Any, Optional
@@ -19,6 +21,7 @@ logger.setLevel(logging.INFO)
 BASE = "https://metabase.sbmt.io"
 CARD_ID = 87869
 
+
 def update_metabase_token():
     url = f"https://metabase.sbmt.io/api/session"
     headers = {"Content-Type": "application/json"}
@@ -29,6 +32,7 @@ def update_metabase_token():
     data = response.json()
     return data.get("id")
 
+
 def normalize_phone(phone: str) -> str:
     if phone is None:
         return ""
@@ -37,12 +41,14 @@ def normalize_phone(phone: str) -> str:
         digits = "7" + digits[1:]
     return digits
 
+
 def match_by_phone(obj_phone: str, query_phone: str) -> bool:
     a = normalize_phone(obj_phone)
     b = normalize_phone(query_phone)
     if not a or not b:
         return False
     return a[-10:] == b[-10:]
+
 
 def get_completed_orders_by_phone(phone: str, timeout: int = 15) -> int:
     token = update_metabase_token()
@@ -82,6 +88,7 @@ def get_completed_orders_by_phone(phone: str, timeout: int = 15) -> int:
                 return safe_int(row[orders_idx])
         return 0
     return 0
+
 
 def courier_exists(phone: str, timeout: int = 15):
     try:
@@ -126,6 +133,7 @@ def courier_exists(phone: str, timeout: int = 15):
         return {"found": False, "row": None, "error": None}
     return {"found": False, "row": None, "error": None}
 
+
 def _parse_date_lead(value) -> Optional[datetime.datetime]:
     if not value:
         return None
@@ -158,6 +166,7 @@ def _parse_date_lead(value) -> Optional[datetime.datetime]:
         except Exception:
             pass
     return None
+
 
 def get_promotions(phone: str, timeout: int = 15) -> List[Dict[str, Any]]:
     """
@@ -299,6 +308,7 @@ def get_promotions(phone: str, timeout: int = 15) -> List[Dict[str, Any]]:
 
     return deduped
 
+
 def get_date_lead(phone_number: str, timeout=15):
     try:
         token = update_metabase_token()
@@ -319,3 +329,263 @@ def get_date_lead(phone_number: str, timeout=15):
     except Exception as e:
         logger.exception("Error getting date lead")
 
+def compute_referral_commissions_for_inviter(inviter_identifier: str,
+                                             card_id: int = 87866,
+                                             date_from: Optional[datetime.date] = None,
+                                             date_to: Optional[datetime.date] = None,
+                                             timeout: int = 30):
+    results: Dict[str, Any] = {
+        "inviter": inviter_identifier,
+        "date_from": None,
+        "date_to": None,
+        "total_earned_friends": 0.0,
+        "commission_5pct": 0.0,
+        "details": [],
+        "errors": []
+    }
+
+    # period defaults: from first day of current month to today
+    today = datetime.date.today()
+    if date_to is None:
+        date_to = today
+    if date_from is None:
+        date_from = today.replace(day=1)
+
+    results["date_from"] = date_from.isoformat()
+    results["date_to"] = date_to.isoformat()
+
+    # helper to safely parse numeric "Итого"
+    def safe_float(x):
+        try:
+            if x is None:
+                return 0.0
+            if isinstance(x, (int, float, Decimal)):
+                return float(x)
+            s = str(x).replace(",", ".")
+            # strip non numeric except dot and minus
+            s = re.sub(r"[^\d\.-]", "", s)
+            return float(s) if s not in ("", ".", "-", "-.") else 0.0
+        except Exception:
+            return 0.0
+
+    # 1) read invite sheet and collect invited friends for this inviter
+    try:
+        from handlers.services import _get_worksheet_values_by_title  # matches earlier code style
+    except Exception:
+        try:
+            # fallback import if package structure different
+            from handlers.services import _get_worksheet_values_by_title
+        except Exception as e:
+            results["errors"].append(f"Cannot import worksheet helper: {e}")
+            print(results)
+            return 0.0
+
+    vals = _get_worksheet_values_by_title("Акция приведи друга")
+    if not vals or len(vals) < 2:
+        results["errors"].append("Invite sheet empty or not found")
+        print(results)
+        return 0.0
+
+    headers = vals[0]
+    norm_headers = [((h or "").strip().lower()) for h in headers]
+
+    def find_header_index(*candidates):
+        for cand in candidates:
+            candl = (cand or "").lower()
+            for idx, h in enumerate(norm_headers):
+                if candl in h:
+                    return idx
+        return None
+
+    idx_inviter_phone = find_header_index("номер телефона пригласившего", "телефон пригласившего", "inviter phone", "номер телефона", "телефон")
+    idx_inviter_tg = find_header_index("telegram id пригласившего", "tg id пригласившего", "telegram id", "tg id", "telegram")
+    idx_invited_phone = find_header_index("номер телефона приглашенного", "телефон приглашенного", "invited phone", "телефон приглашенного")
+    idx_invited_name = find_header_index("фио приглашенного", "фио приглашенного", "имя приглашенного", "имя приглашенного", "имя")
+
+    # normalize inviter identifier
+    inv_id_raw = str(inviter_identifier or "").strip()
+    inv_digits = re.sub(r"\D+", "", inv_id_raw)
+    inv_low = inv_id_raw.lower()
+
+    invited_list = []  # tuples (friend_name, friend_phone)
+    for row in vals[1:]:
+        def cell(row, idx):
+            try:
+                return (row[idx] or "").strip() if idx is not None and idx < len(row) else ""
+            except Exception:
+                return ""
+        try:
+            cell_inv_phone = cell(row, idx_inviter_phone)
+            cell_inv_tg = cell(row, idx_inviter_tg)
+            # match by tg id exact or by phone suffix 10 digits or exact digits
+            matched = False
+            if inv_digits:
+                # compare last 10 digits
+                if cell_inv_phone and re.sub(r"\D+", "", cell_inv_phone)[-10:] == inv_digits[-10:]:
+                    matched = True
+                if not matched and re.sub(r"\D+", "", cell_inv_phone) == inv_digits:
+                    matched = True
+            if not matched and cell_inv_tg and inv_low and inv_low == cell_inv_tg.lower():
+                matched = True
+
+            if matched:
+                fphone = cell(row, idx_invited_phone)
+                fname = cell(row, idx_invited_name)
+                if fphone or fname:
+                    invited_list.append({"name": fname or "", "phone": fphone or ""})
+        except Exception:
+            continue
+
+    if not invited_list:
+        results["errors"].append("No invited friends found for inviter")
+        print(results)
+        return 0.0
+
+    # 2) query Metabase card and aggregate
+    try:
+        token = update_metabase_token()
+    except Exception as e:
+        results["errors"].append(f"Metabase auth failed: {e}")
+        print(results)
+        return 0.0
+
+    url = f"{BASE}/api/card/{int(card_id)}/query/json"
+    headers = {"X-Metabase-Session": token, "Content-Type": "application/json"}
+
+    payload = {"parameters": [], "ignore_cache": True}
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        results["errors"].append(f"Metabase query failed: {e}")
+        print(results)
+        return 0.0
+
+    # normalize metabase rows into list of dicts
+    metarows: List[Dict[str, Any]] = []
+    if isinstance(data, list):
+        metarows = data
+    elif isinstance(data, dict) and data.get("data"):
+        cols = [c.get("name") for c in data["data"].get("cols", [])]
+        rows = data["data"].get("rows", []) or []
+        for r in rows:
+            obj = {cols[i]: r[i] for i in range(min(len(cols), len(r)))}
+            metarows.append(obj)
+    else:
+        results["errors"].append("Unexpected metabase response format")
+        print(results)
+        return 0.0
+
+    col_keys = set()
+    if metarows:
+        col_keys = set(metarows[0].keys())
+
+    def find_col(*cands):
+        for cand in cands:
+            for k in col_keys:
+                if cand.lower() in (str(k or "").lower()):
+                    return k
+        return None
+
+    uuid_col = find_col("uuid", "uu id", "u u id")
+    phone_col = find_col("телефон", "phone", "phone_number", "contact")
+    name_col = find_col("фио", "имя", "name", "full name", "fullname")
+    type_col = find_col("тип", "type", "type_event", "event", "type_event")
+    total_col = find_col("итого", "итог", "total", "sum", "amount", "amount_total")
+    date_col = find_col("дата", "date", "created_at", "lead date", "lead_date", "date_lead")
+
+    # Function to check date within range
+    def in_range(dt_val):
+        if not dt_val:
+            return False
+        dt = _parse_date_lead(dt_val)
+        if not dt:
+            return False
+        d = dt.date()
+        return (d >= date_from) and (d <= date_to)
+
+    # For each invited friend: find uuid(s) by matching phone+name
+    total_sum = 0.0
+    details = []
+    for f in invited_list:
+        fname = f.get("name") or ""
+        fphone = f.get("phone") or ""
+        fphone_n = normalize_phone(fphone)
+        found_uuids = set()
+
+        # First pass: find rows that look like this friend (phone match and/or name match)
+        for row in metarows:
+            try:
+                row_phone = str(row.get(phone_col) or "")
+                row_name = str(row.get(name_col) or "")
+            except Exception:
+                row_phone = ""
+                row_name = ""
+            if row_phone and fphone_n and normalize_phone(row_phone).endswith(fphone_n[-10:]):
+                if uuid_col and row.get(uuid_col):
+                    found_uuids.add(str(row.get(uuid_col)))
+            elif fname and row_name and fname.strip().lower() == row_name.strip().lower():
+                if uuid_col and row.get(uuid_col):
+                    found_uuids.add(str(row.get(uuid_col)))
+
+        # If no uuid found by that, also try matching phone-only across any row that has uuid
+        if not found_uuids and fphone_n:
+            for row in metarows:
+                row_phone = str(row.get(phone_col) or "")
+                if row_phone and normalize_phone(row_phone).endswith(fphone_n[-10:]) and row.get(uuid_col):
+                    found_uuids.add(str(row.get(uuid_col)))
+
+        # Now for each uuid found, sum up 'Итого' for rows where type == "Смена" and date in range
+        friend_sum = 0.0
+        if found_uuids:
+            for row in metarows:
+                try:
+                    row_uuid = str(row.get(uuid_col) or "")
+                except Exception:
+                    row_uuid = ""
+                if not row_uuid or row_uuid not in found_uuids:
+                    continue
+                # check type
+                row_type = str(row.get(type_col) or "").strip()
+                # consider "Смена" match case-insensitive / substring
+                if row_type:
+                    if "смен" not in row_type.lower() and "shift" not in row_type.lower():
+                        continue
+                else:
+                    # if no type column, skip (conservative)
+                    continue
+                # date filter
+                if not in_range(row.get(date_col)):
+                    continue
+                # accumulate total
+                friend_sum += safe_float(row.get(total_col))
+        else:
+            # If no uuid found, still attempt matching by phone+type+date to accumulate
+            for row in metarows:
+                row_phone = str(row.get(phone_col) or "")
+                if fphone_n and row_phone and normalize_phone(row_phone).endswith(fphone_n[-10:]):
+                    row_type = str(row.get(type_col) or "").strip()
+                    if row_type and ("смен" in row_type.lower() or "shift" in row_type.lower()):
+                        if in_range(row.get(date_col)):
+                            friend_sum += safe_float(row.get(total_col))
+
+        total_sum += friend_sum
+        details.append({
+            "friend_name": fname,
+            "friend_phone": fphone,
+            "uuids": list(found_uuids),
+            "earned": round(friend_sum, 2),
+            "commission": round(friend_sum * 0.05, 2)
+        })
+
+    results["details"] = details
+    results["total_earned_friends"] = round(total_sum, 2)
+    results["commission_5pct"] = round(total_sum * 0.05, 2)
+
+    print(results)
+
+    if "No invited friends found for inviter" in results["errors"]:
+        return 0
+    else:
+        return round(total_sum * 0.05, 2)
