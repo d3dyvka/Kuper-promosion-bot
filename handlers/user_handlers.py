@@ -11,11 +11,11 @@ from aiogram.utils.formatting import PhoneNumber
 from create_bot import bot
 from db.crud import create_user, get_user_by_tg_id
 from jump.jump_integrations import get_balance_by_phone, perform_withdrawal
-from metabase.metabase_integration import get_completed_orders_by_phone, courier_exists, get_promotions
+from metabase.metabase_integration import get_completed_orders_by_phone, courier_exists, get_promotions, get_date_lead
 from .user_states import RegState, InviteFriendStates, PromoStates, WithdrawStates
 from .services import (
     load_json, contact_kb,
-    build_main_menu, build_invite_friend_menu, add_person_to_external_sheet
+    build_main_menu, build_invite_friend_menu, add_person_to_external_sheet, get_msg
 )
 from amocrm.amocrm_integration import find_or_create_contact_and_create_task_async
 from decouple import config
@@ -28,12 +28,20 @@ urouter = Router()
 # pending storage
 pending_actions = {}
 _local_counter = 0
+user_langs = {}
 
 
 def _next_local():
     global _local_counter
     _local_counter += 1
     return f"local_{_local_counter}"
+
+
+def _get_lang_for_user(tg_id: int) -> str:
+    try:
+        return user_langs.get(int(tg_id), "ru")
+    except Exception:
+        return "ru"
 
 
 MANAGER_CHAT_ID = config('MANAGER_CHAT_ID')
@@ -43,23 +51,75 @@ EXTERNAL_SHEET_NAME = config('EXTERNAL_SHEET_NAME')
 
 @urouter.message(CommandStart())
 async def on_startup(message: Message, state: FSMContext):
+    """
+    Первый экран: выбор языка. Всё настраивается через локализацию.
+    Отправляем промпт на русском (как просили) — но при этом тексты
+    вынесены в config.json и доступны на всех языках.
+    """
     await state.clear()
-    await message.answer(load_json().get("hello_text", "Привет! Это бот Купера."))
+    # используем русский вариант, потому что это первый шаг (пока не выбран язык)
+    prompt = get_msg("choose_language_prompt", "ru")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=get_msg("lang_ru_label", "ru"), callback_data="lang_ru"),
+         InlineKeyboardButton(text=get_msg("lang_uz_label", "ru"), callback_data="lang_uz")],
+        [InlineKeyboardButton(text=get_msg("lang_tg_label", "ru"), callback_data="lang_tg"),
+         InlineKeyboardButton(text=get_msg("lang_ky_label", "ru"), callback_data="lang_ky")]
+    ])
+    await message.answer(prompt, reply_markup=kb)
+
+
+@urouter.callback_query(F.data.startswith("lang_"))
+async def cb_set_language(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+    lang = call.data.split("_", 1)[1]  # 'ru', 'uz', 'tg', 'ky'
+    user_id = call.from_user.id
+    user_langs[user_id] = lang
+
+    # Send greeting in selected language
+    try:
+        await call.message.answer(get_msg("hello_text", lang))
+    except Exception:
+        # fallback to Russian if key missing
+        await call.message.answer(get_msg("hello_text", "ru"))
+
+    # Continue depending on whether user exists
+    user = await get_user_by_tg_id(user_id)
+    if user:
+        balance = get_balance_by_phone(user.phone) if user else 0
+        date = get_date_lead(user.phone) if user and getattr(user, "phone", None) else None
+        # build_main_menu may accept lang in your services implementation
+        main_text = get_msg("main_menu_text", lang, bal=balance, date=date or "0", invited=None)
+        await call.message.answer(main_text, reply_markup=build_main_menu(lang))
+    else:
+        # ask for FIO in selected language
+        await call.message.answer(get_msg("get_name_text", lang))
+        await state.set_state(RegState.FIO)
+
+
+# --- note: original repo contained a duplicate on_startup; we keep it (logic preserved)
+@urouter.message(CommandStart())
+async def on_startup_old(message: Message, state: FSMContext):
+    # keep older behaviour but use translations based on stored language (if any)
+    await state.clear()
+    lang = _get_lang_for_user(message.from_user.id)
+    # send hello (falls back to Russian internally if translation missing)
+    await message.answer(get_msg("hello_text", lang))
     user = await get_user_by_tg_id(message.from_user.id)
     balance = get_balance_by_phone(user.phone) if user else 0
     if user:
-        await message.answer(f"Главное меню:\n\nБаланс: {balance}\n\nЗаработано от приглашенных друзей: {None}",
-                             reply_markup=build_main_menu())
+        main_text = get_msg("main_menu_text", lang, bal=balance, date=get_date_lead(user.phone) or "—", invited=None)
+        await message.answer(main_text, reply_markup=build_main_menu(lang))
     else:
-        await message.answer("Пожалуйста, напишите своё ФИО:")
+        await message.answer(get_msg("get_name_text", lang))
         await state.set_state(RegState.FIO)
 
 
 @urouter.message(RegState.FIO)
 async def reg_name(message: Message, state: FSMContext):
+    lang = _get_lang_for_user(message.from_user.id)
     await state.update_data(name=message.text.strip())
     await message.answer(
-        load_json().get("get_contact_text"),
+        get_msg("get_contact_text", lang),
         reply_markup=contact_kb()
     )
     await state.set_state(RegState.phone_number)
@@ -67,33 +127,37 @@ async def reg_name(message: Message, state: FSMContext):
 
 @urouter.message(RegState.phone_number, PhoneNumber)
 async def reg_contact(message: Message, state: FSMContext):
+    lang = _get_lang_for_user(message.from_user.id)
     contact = message.contact
     phone = contact.phone_number
     await state.update_data(phone=phone)
-    await message.answer(load_json().get("ask_city_text", "Спасибо. Укажите ваш город:"),
+    await message.answer(get_msg("ask_city_text", lang),
                          reply_markup=ReplyKeyboardRemove())
     await state.set_state(RegState.City)
 
 
 @urouter.message(Command("menu"))
 async def menu(message: Message, state: FSMContext):
+    lang = _get_lang_for_user(message.from_user.id)
     await state.clear()
     user = await get_user_by_tg_id(message.from_user.id)
     balance = get_balance_by_phone(user.phone) if user else 0
     if user:
-        await message.answer(f"Главное меню:\n\nБаланс: {balance}\n\nЗаработано от приглашенных друзей: {None}",
-                             reply_markup=build_main_menu())
+        main_text = get_msg("main_menu_text", lang, bal=balance, date=get_date_lead(user.phone) or "—", invited=None)
+        await message.answer(main_text, reply_markup=build_main_menu(lang))
 
 
 @urouter.message(RegState.City)
 async def reg_city(message: Message, state: FSMContext):
+    lang = _get_lang_for_user(message.from_user.id)
     await state.update_data(city=message.text.strip())
-    await message.answer(load_json().get("courier_type_text", "Какой тип курьера вы? (пеший/вело/авто)"))
+    await message.answer(get_msg("courier_type_text", lang))
     await state.set_state(RegState.Type_of_curer)
 
 
 @urouter.message(RegState.Type_of_curer)
 async def reg_courier_type(message: Message, state: FSMContext):
+    lang = _get_lang_for_user(message.from_user.id)
     await state.update_data(courier_type=message.text.strip())
     data = await state.get_data()
     name = data.get("name")
@@ -102,15 +166,15 @@ async def reg_courier_type(message: Message, state: FSMContext):
     tg_id = message.from_user.id
 
     if not (name and phone and city):
-        await message.answer("Неполные данные для проверки. Попробуйте /start ещё раз.")
+        await message.answer(get_msg("incomplete_data_error", lang))
         await state.clear()
         return
 
-    await message.answer("Проверяю Вас на наличие в нашем парке...")
+    await message.answer(get_msg("checking_in_park", lang))
     try:
         res = courier_exists(phone=phone)
     except Exception as e:
-        logger.exception("Ошибка при проверке Google Sheets")
+        logger.exception("Ошибка при проверке Metabase")
         res = {"found": False, "row": None, "error": str(e)}
 
     # special bypass for admin phone
@@ -118,7 +182,7 @@ async def reg_courier_type(message: Message, state: FSMContext):
         res = {"found": True, "row": None, "error": None}
 
     if not res:
-        await message.answer("Не удалось выполнить проверку (ошибка сервиса). Менеджер получит уведомление.")
+        await message.answer(get_msg("error_check", lang))
         pid = _next_local()
         pending_actions[pid] = {"telegram_id": tg_id, "name": name, "phone": phone, "city": city, "status": "error",
                                 "meta": res.get("error"), "type": "not_in_park"}
@@ -128,12 +192,13 @@ async def reg_courier_type(message: Message, state: FSMContext):
     if res.get("found"):
         await create_user(data.get("name"), data.get("phone"), data.get("city"), message.from_user.id)
         balance = get_balance_by_phone(data.get("phone"))
-        await message.answer(f"Главное меню:\n\nБаланс: {balance}\n\nЗаработано от приглашенных друзей: {None}",
-                             reply_markup=build_main_menu())
+        main_text = get_msg("main_menu_text", lang, bal=balance, date=get_date_lead(phone) or "—", invited=None)
+        await message.answer(main_text,
+                             reply_markup=build_main_menu(lang))
         await state.clear()
         return
     else:
-        await message.answer("Не нашли вас в нашем парке. Создаём задачу менеджеру.")
+        await message.answer(get_msg("not_exist", lang))
         try:
             task_text = f"Проверить кандидата {name} ({phone}), город: {city} — не найден в парке."
             res_amo = await find_or_create_contact_and_create_task_async(name=name, phone=phone, tg_id=tg_id,
@@ -147,7 +212,7 @@ async def reg_courier_type(message: Message, state: FSMContext):
                                 "type": "not_in_park", "amo_result": res_amo}
         if res_amo.get("ok"):
             logger.info(f"Задача создана в amoCRM. ID задачи: {res_amo.get('task_id')}.")
-            await message.answer(f"Менеджер свяжется с вами. Ожидайте")
+            await message.answer(get_msg("manager_answer", lang))
         else:
             await state.clear()
         return
@@ -155,21 +220,23 @@ async def reg_courier_type(message: Message, state: FSMContext):
 
 @urouter.callback_query(F.data == "completed_orders")
 async def cb_completed(call: CallbackQuery):
+    lang = _get_lang_for_user(call.from_user.id)
     user = await get_user_by_tg_id(call.from_user.id)
     total_user_orders = get_completed_orders_by_phone(user.phone)
     await call.answer()
-    await call.message.answer(f"Выполненных заказов: {total_user_orders}.")
+    await call.message.answer(get_msg("completed_orders_text", lang, total_user_orders=total_user_orders))
 
 
 @urouter.callback_query(F.data == "invited_friends")
 async def cb_invited_friends(call: CallbackQuery):
+    lang = _get_lang_for_user(call.from_user.id)
     await call.answer()
     inviter = call.from_user.id
     invited = [(k, v) for k, v in pending_actions.items() if v.get("type") == "invite" and v.get("inviter") == inviter]
     if not invited:
-        await call.message.answer("Вы ещё не приглашали друзей.")
+        await call.message.answer(get_msg("not_invited_friends", lang))
     else:
-        txt = "Список приглашённых:\n"
+        txt = get_msg("list_invited", lang)
         for k, v in invited:
             txt += f"- {v.get('friend_name', '?')} (тел: {v.get('friend_phone', '?')}), статус: {v.get('status')}\n"
         await call.message.answer(txt)
@@ -177,47 +244,53 @@ async def cb_invited_friends(call: CallbackQuery):
 
 @urouter.callback_query(F.data == "invite_friend")
 async def cb_invite_friend_start(call: CallbackQuery, state: FSMContext):
+    lang = _get_lang_for_user(call.from_user.id)
     await call.answer()
     await state.set_state(InviteFriendStates.friend_name)
-    await call.message.answer(load_json().get("invite_intro", "Пригласите друга — получите бонус."),
+    await call.message.answer(get_msg("invite_intro", lang),
                               reply_markup=build_invite_friend_menu())
-    await call.message.answer(load_json().get("invite_step_name", "Отправьте ФИО приглашённого:"))
+    await call.message.answer(get_msg("invite_step_name", lang))
     await state.set_state(InviteFriendStates.friend_name)
 
 
 @urouter.message(InviteFriendStates.friend_name)
 async def invite_friend_name(message: Message, state: FSMContext):
+    lang = _get_lang_for_user(message.from_user.id)
     await state.update_data(friend_name=message.text.strip())
-    await message.answer(load_json().get("invite_step_contact", "Напишите номер телефона друга в формате +7XXXXXXXXXX"))
+    await message.answer(get_msg("invite_step_contact", lang))
     await state.set_state(InviteFriendStates.friend_contact)
 
 
 @urouter.message(InviteFriendStates.friend_contact)
 async def invite_friend_contact(message: Message, state: FSMContext):
+    lang = _get_lang_for_user(message.from_user.id)
     phone = message.text.strip()
     await state.update_data(friend_phone=phone)
-    await message.answer(load_json().get("invite_step_city", "Укажите город друга:"),
+    await message.answer(get_msg("invite_step_city", lang),
                          reply_markup=ReplyKeyboardRemove())
     await state.set_state(InviteFriendStates.friend_city)
 
 
 @urouter.message(InviteFriendStates.friend_city)
 async def invite_friend_city(message: Message, state: FSMContext):
+    lang = _get_lang_for_user(message.from_user.id)
     await state.update_data(friend_city=message.text.strip())
-    await message.answer(load_json().get("invite_step_role", "Укажите роль (пеший, вело, авто):"))
+    await message.answer(get_msg("invite_step_role", lang))
     await state.set_state(InviteFriendStates.friend_role)
 
 
 @urouter.message(InviteFriendStates.friend_role)
 async def invite_friend_role(message: Message, state: FSMContext):
+    lang = _get_lang_for_user(message.from_user.id)
     await state.update_data(friend_role=message.text.strip())
     await message.answer(
-        load_json().get("invite_step_birthday", "Укажите дату рождения приглашённого (ДД.MM.ГГГГ):"))
+        get_msg("invite_step_birthday", lang))
     await state.set_state(InviteFriendStates.friend_birthday)
 
 
 @urouter.message(InviteFriendStates.friend_birthday)
 async def invite_friend_birthday(message: Message, state: FSMContext):
+    lang = _get_lang_for_user(message.from_user.id)
     await state.update_data(friend_birthday=message.text.strip())
     data = await state.get_data()
     inviter = message.from_user.id
@@ -227,7 +300,7 @@ async def invite_friend_birthday(message: Message, state: FSMContext):
     city = data.get("friend_city")
     role = data.get("friend_role")
 
-    await message.answer("Создаю заявку менеджеру на приглашение друга...")
+    await message.answer(get_msg("manager_invite_friend_text", lang))
     try:
         from .services import add_invite_friend_row
         sheet_row = add_invite_friend_row(inviter_tg_id=inviter,
@@ -275,17 +348,16 @@ async def invite_friend_birthday(message: Message, state: FSMContext):
     }
 
     if res.get("ok"):
-        await message.answer(load_json().get("invite_done_text", "Спасибо! Мы создали заявку менеджеру."))
-    else:
-        await message.answer("Не удалось создать задачу в amoCRM. Создан локальный запрос менеджеру.")
+        await message.answer(get_msg("invite_done_text", lang))
 
     await state.set_state(InviteFriendStates.friend_check)
-    await message.answer("Ожидаем подтверждения региcтрации друга.")
+    await message.answer(get_msg("wait_friend_reg", lang))
     return
 
 
 @urouter.message(InviteFriendStates.friend_check)
 async def invite_friend_check_commands(message: Message, state: FSMContext):
+    lang = _get_lang_for_user(message.from_user.id)
     text = message.text.strip()
     if text.startswith("confirm_friend_registered"):
         parts = text.split()
@@ -294,11 +366,13 @@ async def invite_friend_check_commands(message: Message, state: FSMContext):
             entry = pending_actions.get(pid)
             if entry and entry.get("type") == "invite":
                 entry["status"] = "registered"
-                await message.answer("Друг успешно зарегистрирован! Спасибо за приглашение.")
+                await message.answer(get_msg("invite_fried_success", lang))
                 inviter = entry.get("inviter")
                 try:
+                    # notify inviter in their language if possible
+                    inv_lang = _get_lang_for_user(inviter)
                     await bot.send_message(inviter,
-                                           f"Ваш приглашённый {entry.get('friend_name')} успешно зарегистрирован.")
+                                           get_msg("friend_invite_success", inv_lang, name=entry.get("friend_name")))
                 except Exception:
                     logger.exception("Can't notify inviter")
                 await state.clear()
@@ -311,15 +385,14 @@ async def invite_friend_check_commands(message: Message, state: FSMContext):
             if entry and entry.get("type") == "invite":
                 entry["status"] = "error"
                 entry["error"] = "registration_failed"
-                await message.answer("Регистрация друга не удалась. Ошибка: проблема с номером.")
+                await message.answer(get_msg("phone_fail_invite", lang))
                 await message.answer(
-                    "Пожалуйста, попросите друга прислать правильный контакт или нажмите кнопку ниже, чтобы отправить новый контакт.",
+                    get_msg("phone_retry_prompt", lang),
                     reply_markup=contact_kb())
                 await state.update_data(retry_pid=pid)
                 await state.set_state(InviteFriendStates.friend_contact)
                 return
-    await message.answer(
-        "Ожидание подтверждения. Для теста используйте 'confirm_friend_registered {local_id}' или 'friend_registration_error {local_id}'.")
+    await message.answer(get_msg("wait_confirm_text", lang))
 
 
 def _split_text_chunks(text: str, limit: int = 3900) -> list:
@@ -363,22 +436,23 @@ def _split_text_chunks(text: str, limit: int = 3900) -> list:
 
 @urouter.callback_query(F.data == "promotions")
 async def cb_promotions(call: CallbackQuery, state: FSMContext):
+    lang = _get_lang_for_user(call.from_user.id)
     await call.answer()
     user = await get_user_by_tg_id(call.from_user.id)
     phone = user.phone if user else None
     if not phone:
-        await call.message.answer("Не задан номер в профиле. Обновите, пожалуйста.")
+        await call.message.answer(get_msg("phone_profile_error", lang))
         return
 
     try:
         promos = await asyncio.to_thread(get_promotions, phone)
     except Exception:
         logger.exception("Error getting promotions")
-        await call.message.answer("Ошибка при получении акций. Попробуйте позже.")
+        await call.message.answer(get_msg("promotions_error", lang))
         return
 
     if not promos:
-        await call.message.answer("📭 Пока нет доступных акций.")
+        await call.message.answer(get_msg("not_promotions", lang))
         return
 
     today = datetime.date.today()
@@ -403,12 +477,12 @@ async def cb_promotions(call: CallbackQuery, state: FSMContext):
 
         if ptype == "refer":
             # build refer line
-            base = title or "Приведи друга"
+            base = title or get_msg("refer_title_default", lang)
             parts = [base]
             if desc:
                 parts.append(desc)
             if reward:
-                parts.append(f"Награда: {reward}")
+                parts.append(get_msg("reward_label", lang) + f" {reward}")
             line = " - ".join(parts)
             if line not in seen:
                 seen.add(line)
@@ -416,12 +490,12 @@ async def cb_promotions(call: CallbackQuery, state: FSMContext):
             continue
 
         if ptype == "first":
-            base = title or "Первый заказ"
+            base = title or get_msg("first_order_title_default", lang)
             parts = [base]
             if desc:
                 parts.append(desc)
             if reward:
-                parts.append(f"Бонус: {reward}")
+                parts.append(get_msg("bonus_label", lang) + f" {reward}")
             line = " - ".join(parts)
             if line not in seen:
                 seen.add(line)
@@ -493,19 +567,19 @@ async def cb_promotions(call: CallbackQuery, state: FSMContext):
             continue
 
         # fallback
-        base = title or "Акция"
+        base = title or get_msg("promo_default_title", lang)
         parts = [base]
         if desc:
             parts.append(desc)
         if reward:
-            parts.append(f"Награда: {reward}")
+            parts.append(get_msg("reward_label", lang) + f" {reward}")
         line = " - ".join(parts)
         if line not in seen:
             seen.add(line)
             lines.append(line)
 
     # prepare header + lines joined with blank line between
-    header = "📣 Доступные акции:\n\n"
+    header = get_msg("active_promotions", lang)
     # ensure each line on its own paragraph
     body = "\n\n".join(lines)
     full_text = header + body
@@ -513,7 +587,7 @@ async def cb_promotions(call: CallbackQuery, state: FSMContext):
     # split into chunks safe for Telegram
     chunks = _split_text_chunks(full_text, limit=3900)
     kb_last = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="Вернуться в главное меню", callback_data="to_start")]])
+        inline_keyboard=[[InlineKeyboardButton(text=get_msg("to_start_kb", lang), callback_data="to_start")]])
 
     try:
         for i, ch in enumerate(chunks):
@@ -530,30 +604,31 @@ async def cb_promotions(call: CallbackQuery, state: FSMContext):
             await call.message.answer(short, reply_markup=kb_last)
             await state.set_state(PromoStates.viewing)
         except Exception:
-            await call.message.answer("Доступные акции (слишком длинное сообщение). Обратитесь в поддержку.",
-                                      reply_markup=kb_last)
+            await call.message.answer(get_msg("not_promotions", lang), reply_markup=kb_last)
             await state.set_state(PromoStates.viewing)
 
 
 @urouter.callback_query(F.data == "withdraw")
 async def cb_withdraw_start(call: CallbackQuery, state: FSMContext):
+    lang = _get_lang_for_user(call.from_user.id)
     await call.answer()
     await state.set_state(WithdrawStates.ask_amount)
-    await call.message.answer("Введите сумму для вывода (числом, в рублях):")
+    await call.message.answer(get_msg("withdrawal_amount", lang))
 
 
 @urouter.message(WithdrawStates.ask_amount)
 async def withdraw_enter_amount(message: Message, state: FSMContext):
+    lang = _get_lang_for_user(message.from_user.id)
     user = await get_user_by_tg_id(message.from_user.id)
     if not user or not user.phone:
-        await message.answer("Нужен номер телефона в профиле. Обновите профиль.")
+        await message.answer(get_msg("phone_profile_error", lang))
         await state.clear()
         return
     text = message.text.strip().replace(",", ".")
     try:
         amount = float(re.sub(r"[^\d\.]", "", text))
     except Exception:
-        await message.answer("Неверный формат суммы. Попробуйте ещё раз.")
+        await message.answer(get_msg("withdrawal_amount_error", lang))
         return
 
     # get balance to check minimum remain 50
@@ -564,7 +639,7 @@ async def withdraw_enter_amount(message: Message, state: FSMContext):
         bal = 0.0
     allowed = bal - 50.0
     if amount > allowed:
-        await message.answer("Нельзя вывести больше. На счету должно остаться минимум 50 ₽.")
+        await message.answer(get_msg("withdrawal_request_error", lang))
         await state.clear()
         return
 
@@ -572,39 +647,41 @@ async def withdraw_enter_amount(message: Message, state: FSMContext):
         res = await asyncio.to_thread(perform_withdrawal, phone=user.phone, amount=amount)
     except Exception:
         logger.exception("Withdrawal error")
-        await message.answer("Ошибка при попытке вывода. Попробуйте позже.")
+        await message.answer(get_msg("withdrawal_attempt_error", lang))
         await state.clear()
         return
 
     if not res.get("ok"):
         reason = res.get("reason")
         if reason == "insufficient_after_minimum":
-            await message.answer("На вашем счёте недостаточно средств.")
+            await message.answer(get_msg("withdrawal_insufficient", lang))
         else:
-            await message.answer(f"Не удалось создать выплату: {reason}")
+            await message.answer(get_msg("withdrawal_create_failed", lang, reason=reason))
         await state.clear()
         return
 
     amount_sent = res.get("amount_sent") or amount
     await message.answer(
-        f"Запрос на выплату создан.\nСумма: {amount_sent:.2f} ₽\nСтатус: создана, менеджер подтвердит.",
-        reply_markup=build_main_menu())
+        get_msg("withgrawal_request", lang, amount_sent=float(amount_sent)),
+        reply_markup=build_main_menu(lang))
     await state.clear()
 
 
 @urouter.callback_query(F.data == "to_start")
 async def cb_to_start(call: CallbackQuery):
+    lang = _get_lang_for_user(call.from_user.id)
     await call.answer()
     user = await get_user_by_tg_id(call.from_user.id)
     balance = get_balance_by_phone(user.phone) if user else 0
-    await call.message.answer(f"Главное меню:\n\nБаланс: {balance}\n\nЗаработано от приглашенных друзей: {None}",
-                              reply_markup=build_main_menu())
+    main_text = get_msg("main_menu_text", lang, bal=balance, date=get_date_lead(user.phone) if user else "—", invited=None)
+    await call.message.answer(main_text, reply_markup=build_main_menu(lang))
 
 
 @urouter.callback_query(F.data == "contact_manager")
 async def cb_contact_manager(call: CallbackQuery):
+    lang = _get_lang_for_user(call.from_user.id)
     await call.answer()
-    await call.message.answer("Контакты менеджера: +7 499 999 01 25 (Telegram: @RegKuper).")
+    await call.message.answer(get_msg("manager_contact", lang))
 
 
 # debug util

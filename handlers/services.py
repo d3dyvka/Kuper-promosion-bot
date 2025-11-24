@@ -22,82 +22,97 @@ def load_json():
     with open("config.json", "r", encoding="utf-8") as f:
         return json.load(f)
 
-def build_main_menu():
+def get_msg(key: str, lang: str = "ru", **kwargs) -> str:
     cfg = load_json()
+    val = cfg.get(key)
+    if isinstance(val, dict):
+        text = val.get(lang) or val.get("ru") or next(iter(val.values()))
+    else:
+        text = str(val or "")
+    if kwargs:
+        try:
+            return text.format(**kwargs)
+        except Exception:
+            return text
+    return text
+
+
+def build_main_menu(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=cfg["Выполненые заказы"], callback_data="completed_orders")],
-        [InlineKeyboardButton(text=cfg["Пригласить друга"], callback_data="invite_friend")],
-        [InlineKeyboardButton(text=cfg["Промоакции"], callback_data="promotions")],
-        [InlineKeyboardButton(text=cfg["Вывод средств"], callback_data="withdraw")],
+        [InlineKeyboardButton(text=get_msg("btn_completed_orders", lang), callback_data="completed_orders")],
+        [InlineKeyboardButton(text=get_msg("btn_invite_friend", lang), callback_data="invite_friend")],
+        [InlineKeyboardButton(text=get_msg("btn_promotions", lang), callback_data="promotions")],
+        [InlineKeyboardButton(text=get_msg("btn_withdraw", lang), callback_data="withdraw")],
     ])
 
-def build_invite_friend_menu():
-    cfg = load_json()
+
+def build_invite_friend_menu(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Вернуться в начало", callback_data="to_start")],
-            [InlineKeyboardButton(text="Связаться с менеджером", callback_data="contact_manager")],
+            [InlineKeyboardButton(text=get_msg("btn_back_to_start", lang), callback_data="to_start")],
+            [InlineKeyboardButton(text=get_msg("btn_contact_manager", lang), callback_data="contact_manager")],
         ]
     )
 
-def build_promo_list(promos: List[Dict]) -> InlineKeyboardMarkup:
+def build_promo_list(promos: List[Dict], lang: str = "ru") -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(row_width=1)
     if not promos:
-        kb.add(InlineKeyboardButton(text="Вернуться в главное меню", callback_data="to_start"))
+        kb.add(InlineKeyboardButton(text=get_msg("btn_back_to_main", lang), callback_data="to_start"))
         return kb
 
     for p in promos:
-        text = p.get("title") or "Акция"
+        text = p.get("title") or get_msg("promo_default_title", lang)
         reward = p.get("reward")
         if reward:
             text = f"{text} — {reward}"
         kb.add(InlineKeyboardButton(text=text, callback_data=f"promo_{p.get('id')}"))
 
-    kb.add(InlineKeyboardButton(text="Вернуться в главное меню", callback_data="to_start"))
+    kb.add(InlineKeyboardButton(text=get_msg("btn_back_to_main", lang), callback_data="to_start"))
     return kb
 
-def build_promo_details(promo: Dict) -> InlineKeyboardMarkup:
+
+def build_promo_details(promo: Dict, lang: str = "ru") -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(InlineKeyboardButton(text="Назад к списку", callback_data="promotions"))
-    kb.add(InlineKeyboardButton(text="Вернуться в главное меню", callback_data="to_start"))
+    kb.add(InlineKeyboardButton(text=get_msg("btn_back_to_list", lang), callback_data="promotions"))
+    kb.add(InlineKeyboardButton(text=get_msg("btn_back_to_main", lang), callback_data="to_start"))
     return kb
 
-def contact_kb():
+def contact_kb(lang: str = "ru"):
     kb = ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=load_json().get("contact_button_text", "Отправить мой номер"), request_contact=True)]
+            [KeyboardButton(text=get_msg("contact_button_text", lang), request_contact=True)]
         ],
         resize_keyboard=True,
         one_time_keyboard=True
     )
     return kb
 
-def manager_withdraw_kb(pid: str) -> InlineKeyboardMarkup:
+def manager_withdraw_kb(pid: str, lang: str = "ru") -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"withdraw_confirm_{pid}"),
-            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"withdraw_reject_{pid}")
+            InlineKeyboardButton(text=get_msg("btn_confirm", lang), callback_data=f"withdraw_confirm_{pid}"),
+            InlineKeyboardButton(text=get_msg("btn_reject", lang), callback_data=f"withdraw_reject_{pid}")
         ]
     ])
     return kb
 
-def user_after_confirm_kb(pid: str) -> InlineKeyboardMarkup:
+def user_after_confirm_kb(pid: str, lang: str = "ru") -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="✅ Подтвердить вывод", callback_data=f"withdraw_user_confirmed_{pid}"),
-            InlineKeyboardButton(text="❌ Вывод не пришёл", callback_data=f"withdraw_user_not_received_{pid}")
+            InlineKeyboardButton(text=get_msg("btn_user_confirm_withdraw", lang), callback_data=f"withdraw_user_confirmed_{pid}"),
+            InlineKeyboardButton(text=get_msg("btn_user_withdraw_not_received", lang), callback_data=f"withdraw_user_not_received_{pid}")
         ]
     ])
     return kb
 
-def user_rejected_kb() -> InlineKeyboardMarkup:
+def user_rejected_kb(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="↩️ Вернуться в главное меню", callback_data="to_start")]
+        [InlineKeyboardButton(text=get_msg("btn_back_to_main", lang), callback_data="to_start")]
     ])
 
-def promo_done_kb(promo_id: str, threshold: int = 0, sheet_row: int = 0) -> InlineKeyboardMarkup:
+def promo_done_kb(promo_id: str, threshold: int = 0, sheet_row: int = 0, lang: str = "ru") -> InlineKeyboardMarkup:
     cb = f"promo_done|{promo_id}|{threshold}|{sheet_row}"
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Выполнил", callback_data=cb)]])
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=get_msg("btn_promo_done", lang), callback_data=cb)]])
 
 def _normalize_phone(phone: Optional[str]) -> str:
     if not phone:
