@@ -88,8 +88,8 @@ async def cb_set_language(call: CallbackQuery, state: FSMContext):
         await call.message.answer(main_text, reply_markup=build_main_menu(lang))
     else:
         # ask for FIO in selected language
-        await call.message.answer(get_msg("get_name_text", lang))
-        await state.set_state(RegState.FIO)
+        await call.message.answer(get_msg("get_contact_text", lang), reply_markup=contact_kb())
+        await state.set_state(RegState.phone_number)
 
 
 @urouter.message(RegState.FIO)
@@ -97,10 +97,8 @@ async def reg_name(message: Message, state: FSMContext):
     lang = _get_lang_for_user(message.from_user.id)
     await state.update_data(name=message.text.strip())
     await message.answer(
-        get_msg("get_contact_text", lang),
-        reply_markup=contact_kb()
-    )
-    await state.set_state(RegState.phone_number)
+        get_msg("ask_city_text", lang)    )
+    await state.set_state(RegState.City)
 
 
 @urouter.message(RegState.phone_number, PhoneNumber)
@@ -108,10 +106,12 @@ async def reg_contact(message: Message, state: FSMContext):
     lang = _get_lang_for_user(message.from_user.id)
     contact = message.contact
     phone = contact.phone_number
+    if phone:
+        logger.info(f"New phone number {phone} for contact {contact}")
     await state.update_data(phone=phone)
-    await message.answer(get_msg("ask_city_text", lang),
+    await message.answer(get_msg("get_name_text", lang),
                          reply_markup=ReplyKeyboardRemove())
-    await state.set_state(RegState.City)
+    await state.set_state(RegState.FIO)
 
 
 @urouter.message(Command("menu"))
