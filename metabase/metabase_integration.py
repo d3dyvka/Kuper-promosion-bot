@@ -49,6 +49,65 @@ def match_by_phone(obj_phone: str, query_phone: str) -> bool:
         return False
     return a[-10:] == b[-10:]
 
+import requests
+from decouple import config
+
+BASE = "https://metabase.sbmt.io"
+CARD_ID = 37085
+
+def update_metabase_token():
+    url = f"{BASE}/api/session"
+    resp = requests.post(url, json={
+        "username": config('METABASE_EMAIL'),
+        "password": config('METABASE_PASSWORD')
+    }, timeout=10)
+    print("session status:", resp.status_code)
+    try:
+        print("session body:", resp.text)
+    except Exception:
+        pass
+    resp.raise_for_status()
+    return resp.json().get("id")
+
+def debug_query():
+    s = requests.Session()
+    try:
+        token = update_metabase_token()
+    except Exception as e:
+        print("Auth error:", e)
+        return
+
+    # Check /api/user to confirm who we are
+    try:
+        user_resp = s.get(f"{BASE}/api/user", headers={"X-Metabase-Session": token}, timeout=10)
+        print("/api/user", user_resp.status_code, user_resp.text[:1000])
+    except Exception as e:
+        print("Error calling /api/user:", e)
+
+    # Also try to fetch card metadata (GET) to check read permissions
+    try:
+        card_meta = s.get(f"{BASE}/api/card/{CARD_ID}", headers={"X-Metabase-Session": token}, timeout=10)
+        print(f"GET /api/card/{CARD_ID} ->", card_meta.status_code)
+        print("card meta body (truncated):", card_meta.text[:1000])
+    except Exception as e:
+        print("Error getting card metadata:", e)
+
+    # Now the actual query; capture full response
+    url = f"{BASE}/api/card/{CARD_ID}/query/json"
+    headers = {"X-Metabase-Session": token, "Content-Type": "application/json"}
+    payload = {"parameters": [], "ignore_cache": True}
+    resp = s.post(url, headers=headers, json=payload, timeout=15)
+    print("POST query status:", resp.status_code)
+    print("POST query headers:", resp.request.headers)
+    try:
+        print("POST response text (truncated):", resp.text[:2000])
+    except Exception:
+        pass
+    # if non-JSON, this will raise; wrap to inspect
+    try:
+        print("POST response json preview:", resp.json())
+    except Exception as e:
+        print("Could not parse json:", e)
 
 def get_completed_orders_by_phone(phone: str, timeout: int = 15) -> int:
     token = update_metabase_token()

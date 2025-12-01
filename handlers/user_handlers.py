@@ -13,9 +13,10 @@ from db.crud import create_user, get_user_by_tg_id
 from jump.jump_integrations import get_balance_by_phone, perform_withdrawal
 from metabase.metabase_integration import get_completed_orders_by_phone, courier_exists, get_promotions, get_date_lead, \
     compute_referral_commissions_for_inviter
-from .user_states import RegState, InviteFriendStates, PromoStates, WithdrawStates
+from wifi_map.wifi_services import find_wifi_near_location, get_available_wifi_points
+from .user_states import RegState, InviteFriendStates, PromoStates, WithdrawStates, WifiStates
 from .services import (
-    load_json, contact_kb,
+    load_json, contact_kb, location_request_kb,
     build_main_menu, build_invite_friend_menu, add_person_to_external_sheet, get_msg, manager_withdraw_kb
 )
 from amocrm.amocrm_integration import find_or_create_contact_and_create_task_async
@@ -856,6 +857,65 @@ async def cb_contact_manager(call: CallbackQuery):
     lang = _get_lang_for_user(call.from_user.id)
     await call.answer()
     await call.message.answer(get_msg("manager_contact", lang))
+
+
+# --- Wi‑Fi карта ------------------------------------------------------------
+
+
+@urouter.callback_query(F.data == "wifi_map")
+async def cb_wifi_map(call: CallbackQuery, state: FSMContext):
+    """
+    Запрашиваем у пользователя геопозицию и ищем точки Wi‑Fi в радиусе 50 метров.
+    """
+    lang = _get_lang_for_user(call.from_user.id)
+    await call.answer()
+
+    points = get_available_wifi_points()
+    if not points:
+        await call.message.answer(get_msg("wifi_map_no_points", lang))
+        return
+
+    await state.set_state(WifiStates.waiting_location)
+    await call.message.answer(
+        get_msg("wifi_map_request_location", lang),
+        reply_markup=location_request_kb(lang)
+    )
+
+
+@urouter.message(WifiStates.waiting_location)
+async def wifi_receive_location(message: Message, state: FSMContext):
+    lang = _get_lang_for_user(message.from_user.id)
+    if not message.location:
+        await message.answer(get_msg("wifi_map_request_location_retry", lang), reply_markup=location_request_kb(lang))
+        return
+
+    lat = message.location.latitude
+    lon = message.location.longitude
+    await state.clear()
+
+    await message.answer(get_msg("wifi_map_processing", lang), reply_markup=ReplyKeyboardRemove())
+
+    nearby = find_wifi_near_location(lat, lon, radius_m=50.0)
+    if not nearby:
+        await message.answer(get_msg("wifi_map_no_nearby", lang))
+        return
+
+    header = get_msg("wifi_map_results_header", lang, count=len(nearby))
+    await message.answer(header)
+
+    for point in nearby:
+        plat = point.get("lat")
+        plon = point.get("lon")
+        name = point.get("name") or get_msg("wifi_map_point_default_name", lang)
+        desc = point.get("description") or ""
+        dist = point.get("distance_m") or 0
+        text = get_msg("wifi_map_point_line_with_distance", lang, name=name, desc=desc, distance=dist)
+        try:
+            await message.answer_location(latitude=plat, longitude=plon)
+        except Exception:
+            logger.exception("Не удалось отправить геолокацию для точки Wi-Fi %s", name)
+        if text.strip():
+            await message.answer(text)
 
 
 # debug util

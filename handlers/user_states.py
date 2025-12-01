@@ -25,3 +25,7 @@ class WithdrawStates(StatesGroup):
     sbp_phone = State()
     sbp_bank = State()
     awaiting_manager = State()
+
+
+class WifiStates(StatesGroup):
+    waiting_location = State()

@@ -517,6 +517,7 @@ def perform_withdrawal(*,
                        amount: float,
                        requisites: Optional[str] = None,
                        card_number: Optional[str] = None,
+                       phone_hint: Optional[str] = None,
                        bank_hint: Optional[str] = None,
                        tx_type_id: Optional[int] = None,
                        use_preview: bool = True,
@@ -524,10 +525,6 @@ def perform_withdrawal(*,
                        create_payment: bool = True,
                        operation: str = "withdraw",
                        force_try_without_tx_type: bool = False) -> Dict[str, Any]:
-    """
-    Performs withdrawal; enforces MIN_REMAIN on balance.
-    Returns dict with ok/notice/amount_sent fields.
-    """
     MIN_REMAIN = Decimal("50")
     if not phone:
         return {"ok": False, "reason": "need_driver_phone"}
@@ -563,7 +560,17 @@ def perform_withdrawal(*,
 
     profile = get_driver_profile(driver_id) or {}
 
-    candidates_scored = choose_candidates(profile, card_number_hint=card_number, phone_hint=phone, bank_hint=bank_hint)
+    # phone_hint:
+    #  - if explicitly передан (для СБП) — используем его для матчинга реквизитов
+    #  - иначе сохраняем старое поведение — используем номер водителя
+    effective_phone_hint = phone_hint or phone
+
+    candidates_scored = choose_candidates(
+        profile,
+        card_number_hint=card_number,
+        phone_hint=effective_phone_hint,
+        bank_hint=bank_hint,
+    )
     if not candidates_scored:
         card_ids = []
         p = profile.get("item") if isinstance(profile.get("item"), dict) else profile

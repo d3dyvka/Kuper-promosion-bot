@@ -43,6 +43,7 @@ def build_main_menu(lang: str = "ru") -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=get_msg("btn_invite_friend", lang), callback_data="invite_friend")],
         [InlineKeyboardButton(text=get_msg("btn_promotions", lang), callback_data="promotions")],
         [InlineKeyboardButton(text=get_msg("btn_withdraw", lang), callback_data="withdraw")],
+        [InlineKeyboardButton(text=get_msg("btn_wifi_map", lang), callback_data="wifi_map")],
     ])
 
 
@@ -81,6 +82,17 @@ def contact_kb(lang: str = "ru"):
     kb = ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=get_msg("contact_button_text", lang), request_contact=True)]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
+    return kb
+
+
+def location_request_kb(lang: str = "ru"):
+    kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=get_msg("wifi_map_request_location_button", lang), request_location=True)]
         ],
         resize_keyboard=True,
         one_time_keyboard=True
