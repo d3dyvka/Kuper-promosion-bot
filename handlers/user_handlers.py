@@ -121,7 +121,8 @@ async def reg_contact(message: Message, state: FSMContext):
             balance = get_balance_by_phone(phone) if phone else 0
             main_text = get_msg("main_menu_text", lang, bal=balance, date=get_date_lead(phone) or "0", invited=compute_referral_commissions_for_inviter(phone))
             await message.answer(main_text, reply_markup=build_main_menu(lang))
-            await state.clear()
+        await state.clear()
+        return
 
     await state.update_data(phone=phone)
     await message.answer(get_msg("get_name_text", lang),

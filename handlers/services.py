@@ -43,7 +43,6 @@ def build_main_menu(lang: str = "ru") -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=get_msg("btn_invite_friend", lang), callback_data="invite_friend")],
         [InlineKeyboardButton(text=get_msg("btn_promotions", lang), callback_data="promotions")],
         [InlineKeyboardButton(text=get_msg("btn_withdraw", lang), callback_data="withdraw")],
-        [InlineKeyboardButton(text=get_msg("btn_wifi_map", lang), callback_data="wifi_map")],
     ])
 
 
