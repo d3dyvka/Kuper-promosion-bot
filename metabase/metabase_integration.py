@@ -49,26 +49,6 @@ def match_by_phone(obj_phone: str, query_phone: str) -> bool:
         return False
     return a[-10:] == b[-10:]
 
-import requests
-from decouple import config
-
-BASE = "https://metabase.sbmt.io"
-CARD_ID = 37085
-
-def update_metabase_token():
-    url = f"{BASE}/api/session"
-    resp = requests.post(url, json={
-        "username": config('METABASE_EMAIL'),
-        "password": config('METABASE_PASSWORD')
-    }, timeout=10)
-    print("session status:", resp.status_code)
-    try:
-        print("session body:", resp.text)
-    except Exception:
-        pass
-    resp.raise_for_status()
-    return resp.json().get("id")
-
 def debug_query():
     s = requests.Session()
     try:
@@ -147,6 +127,33 @@ def get_completed_orders_by_phone(phone: str, timeout: int = 15) -> int:
                 return safe_int(row[orders_idx])
         return 0
     return 0
+
+def courier_data(phone: str, timeout: int = 15):
+    try:
+        token = update_metabase_token()
+    except Exception as e:
+        logger.exception("Metabase auth error")
+        return {"found": False, "row": None, "error": str(e)}
+
+    url = f"{BASE}/api/card/{CARD_ID}/query/json"
+    headers = {"X-Metabase-Session": token, "Content-Type": "application/json"}
+    payload = {"parameters": [], "ignore_cache": True}
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        logger.exception("Error querying Metabase")
+        return {"found": False, "row": None, "error": str(e)}
+
+    query_phone = normalize_phone(phone)
+
+    if isinstance(data, list):
+        for obj in data:
+            obj_phone = normalize_phone(obj.get("Телефон"))
+            if obj_phone == query_phone:
+                return obj
+        return None
 
 
 def courier_exists(phone: str, timeout: int = 15):
@@ -380,7 +387,7 @@ def get_date_lead(phone_number: str, timeout=15):
         for obj in data:
             if not match_by_phone(obj.get("Телефон"), phone_number):
                 continue
-            dt_lead = _parse_date_lead(data.get("Дата лида"))
+            dt_lead = _parse_date_lead(obj.get("Дата лида"))
             if dt_lead:
                 return dt_lead
             else:

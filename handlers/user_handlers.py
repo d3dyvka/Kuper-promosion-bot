@@ -12,7 +12,7 @@ from create_bot import bot
 from db.crud import create_user, get_user_by_tg_id
 from jump.jump_integrations import get_balance_by_phone, perform_withdrawal
 from metabase.metabase_integration import get_completed_orders_by_phone, courier_exists, get_promotions, get_date_lead, \
-    compute_referral_commissions_for_inviter
+    compute_referral_commissions_for_inviter, normalize_phone, courier_data
 from wifi_map.wifi_services import find_wifi_near_location, get_available_wifi_points
 from .user_states import RegState, InviteFriendStates, PromoStates, WithdrawStates, WifiStates
 from .services import (
@@ -106,9 +106,23 @@ async def reg_name(message: Message, state: FSMContext):
 async def reg_contact(message: Message, state: FSMContext):
     lang = _get_lang_for_user(message.from_user.id)
     contact = message.contact
+    logger.info(f"New contact {contact}")
     phone = contact.phone_number
     if phone:
         logger.info(f"New phone number {phone} for contact {contact}")
+
+    res = courier_exists(phone=phone)
+
+    if res.get("found"):
+        data = courier_data(phone=phone)
+        if data is not None:
+            await create_user(fio=data.get("ФИО партнера"), phone=phone, city=data.get("Город"), tg_id=message.from_user.id)
+            logger.info(f"New user created {phone} {data.get("ФИО партнера")}")
+            balance = get_balance_by_phone(phone) if phone else 0
+            main_text = get_msg("main_menu_text", lang, bal=balance, date=get_date_lead(phone) or "0", invited=compute_referral_commissions_for_inviter(phone))
+            await message.answer(main_text, reply_markup=build_main_menu(lang))
+            await state.clear()
+
     await state.update_data(phone=phone)
     await message.answer(get_msg("get_name_text", lang),
                          reply_markup=ReplyKeyboardRemove())
