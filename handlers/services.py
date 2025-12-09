@@ -37,12 +37,21 @@ def get_msg(key: str, lang: str = "ru", **kwargs) -> str:
     return text
 
 
-def build_main_menu(lang: str = "ru") -> InlineKeyboardMarkup:
+def build_main_menu(lang: str = "ru", limited: bool = False) -> InlineKeyboardMarkup:
+    """
+    Если limited=True — показываем только Wi‑Fi и промо.
+    """
+    if limited:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=get_msg("btn_promotions", lang), callback_data="promotions")],
+            [InlineKeyboardButton(text=get_msg("btn_wifi_map", lang), callback_data="wifi_map")],
+        ])
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=get_msg("btn_completed_orders", lang), callback_data="completed_orders")],
         [InlineKeyboardButton(text=get_msg("btn_invite_friend", lang), callback_data="invite_friend")],
         [InlineKeyboardButton(text=get_msg("btn_promotions", lang), callback_data="promotions")],
         [InlineKeyboardButton(text=get_msg("btn_withdraw", lang), callback_data="withdraw")],
+        [InlineKeyboardButton(text=get_msg("btn_wifi_map", lang), callback_data="wifi_map")],
     ])
 
 
@@ -61,6 +70,7 @@ def build_promo_list(promos: List[Dict], lang: str = "ru") -> InlineKeyboardMark
         return kb
 
     for p in promos:
+        print(p)
         text = p.get("title") or get_msg("promo_default_title", lang)
         reward = p.get("reward")
         if reward:

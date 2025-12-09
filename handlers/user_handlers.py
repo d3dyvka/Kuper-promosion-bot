@@ -1,10 +1,11 @@
 import asyncio
 import logging
 import datetime
+import os
 from aiogram import Router, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
-from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, FSInputFile
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.formatting import PhoneNumber
 
@@ -14,6 +15,7 @@ from jump.jump_integrations import get_balance_by_phone, perform_withdrawal
 from metabase.metabase_integration import get_completed_orders_by_phone, courier_exists, get_promotions, get_date_lead, \
     compute_referral_commissions_for_inviter, normalize_phone, courier_data
 from wifi_map.wifi_services import find_wifi_near_location, get_available_wifi_points
+from users_store import add_or_update_user, is_in_metabase
 from .user_states import RegState, InviteFriendStates, PromoStates, WithdrawStates, WifiStates
 from .services import (
     load_json, contact_kb, location_request_kb,
@@ -31,6 +33,7 @@ urouter = Router()
 pending_actions = {}
 _local_counter = 0
 user_langs = {}
+CONTACT_SCREENSHOT_PATH = "contact_request.png"
 
 
 def _next_local():
@@ -44,6 +47,59 @@ def _get_lang_for_user(tg_id: int) -> str:
         return user_langs.get(int(tg_id), "ru")
     except Exception:
         return "ru"
+
+
+def _is_limited_access(phone: str) -> bool:
+    """
+    Ограничиваем функционал, если нет подтверждения в Metabase.
+    """
+    metabase_flag = is_in_metabase(phone)
+    if metabase_flag is None:
+        # нет сведений — считаем неограниченным (старые пользователи)
+        return False
+    return not bool(metabase_flag)
+
+
+async def _send_contact_screenshot(message: Message):
+    """
+    Отправляет скриншот с кнопкой контакта, если файл присутствует.
+    """
+    if not CONTACT_SCREENSHOT_PATH or not os.path.exists(CONTACT_SCREENSHOT_PATH):
+        return
+    try:
+        photo = FSInputFile(CONTACT_SCREENSHOT_PATH)
+        return await message.answer_photo(photo)
+    except Exception:
+        logger.exception("Не удалось отправить скриншот запроса телефона")
+        return
+
+
+async def _deny_if_limited(entity, lang: str, user) -> bool:
+    """
+    Возвращает True, если доступ ограничен и хендлер должен прекратить выполнение.
+    entity: Message или CallbackQuery
+    """
+    try:
+        phone = getattr(user, "phone", None) if user else None
+    except Exception:
+        phone = None
+    def _send(text: str):
+        try:
+            if hasattr(entity, "message") and getattr(entity, "message", None):
+                return entity.message.answer(text)
+            if hasattr(entity, "answer"):
+                return entity.answer(text)
+        except Exception:
+            logger.exception("Не удалось отправить уведомление об ограничении")
+            return None
+
+    if not phone:
+        await _send(get_msg("phone_profile_error", lang))
+        return True
+    if _is_limited_access(phone):
+        await _send(get_msg("limited_access_message", lang))
+        return True
+    return False
 
 
 MANAGER_CHAT_ID = config('MANAGER_CHAT_ID')
@@ -60,7 +116,8 @@ async def on_startup(message: Message, state: FSMContext):
         [InlineKeyboardButton(text=get_msg("lang_ru_label", "ru"), callback_data="lang_ru"),
          InlineKeyboardButton(text=get_msg("lang_uz_label", "ru"), callback_data="lang_uz")],
         [InlineKeyboardButton(text=get_msg("lang_tg_label", "ru"), callback_data="lang_tg"),
-         InlineKeyboardButton(text=get_msg("lang_ky_label", "ru"), callback_data="lang_ky")]
+         InlineKeyboardButton(text=get_msg("lang_ky_label", "ru"), callback_data="lang_ky")],
+        [InlineKeyboardButton(text=get_msg("lang_en_label", "ru"), callback_data="lang_en")]
     ])
     await message.answer(prompt, reply_markup=kb)
 
@@ -82,14 +139,19 @@ async def cb_set_language(call: CallbackQuery, state: FSMContext):
     # Continue depending on whether user exists
     user = await get_user_by_tg_id(user_id)
     if user:
-        balance = get_balance_by_phone(user.phone) if user else 0
+        limited = _is_limited_access(user.phone)
+        balance = 0 if limited else (get_balance_by_phone(user.phone) if user else 0)
         date = get_date_lead(user.phone) if user and getattr(user, "phone", None) else None
-        # build_main_menu may accept lang in your services implementation
+        add_or_update_user(name=getattr(user, "fio", None), phone=user.phone, tg_id=user_id, in_metabase=not limited)
         main_text = get_msg("main_menu_text", lang, bal=balance, date=date or "0", invited=compute_referral_commissions_for_inviter(user.phone))
-        await call.message.answer(main_text, reply_markup=build_main_menu(lang))
+        if limited:
+            await call.message.answer(get_msg("limited_access_message", lang))
+        await call.message.answer(main_text, reply_markup=build_main_menu(lang, limited=limited))
     else:
         # ask for FIO in selected language
+        # отправляем скриншот вместе с текстом, если файл доступен
         await call.message.answer(get_msg("get_contact_text", lang), reply_markup=contact_kb())
+        await _send_contact_screenshot(call.message)
         await state.set_state(RegState.phone_number)
 
 
@@ -117,10 +179,13 @@ async def reg_contact(message: Message, state: FSMContext):
         data = courier_data(phone=phone)
         if data is not None:
             await create_user(fio=data.get("ФИО партнера"), phone=phone, city=data.get("Город"), tg_id=message.from_user.id)
-            logger.info(f"New user created {phone} {data.get("ФИО партнера")}")
+            add_or_update_user(name=data.get("ФИО партнера"), phone=phone, tg_id=message.from_user.id, in_metabase=True)
+            logger.info(f"New user created {phone} {data.get('ФИО партнера')}")
             balance = get_balance_by_phone(phone) if phone else 0
             main_text = get_msg("main_menu_text", lang, bal=balance, date=get_date_lead(phone) or "0", invited=compute_referral_commissions_for_inviter(phone))
             await message.answer(main_text, reply_markup=build_main_menu(lang))
+        else:
+            add_or_update_user(name=None, phone=phone, tg_id=message.from_user.id, in_metabase=True)
         await state.clear()
         return
 
@@ -135,10 +200,13 @@ async def menu(message: Message, state: FSMContext):
     lang = _get_lang_for_user(message.from_user.id)
     await state.clear()
     user = await get_user_by_tg_id(message.from_user.id)
-    balance = get_balance_by_phone(user.phone) if user else 0
+    limited = _is_limited_access(user.phone) if user else False
+    balance = 0 if limited else (get_balance_by_phone(user.phone) if user else 0)
     if user:
+        if limited:
+            await message.answer(get_msg("limited_access_message", lang))
         main_text = get_msg("main_menu_text", lang, bal=balance, date=get_date_lead(user.phone) or "0", invited=compute_referral_commissions_for_inviter(user.phone))
-        await message.answer(main_text, reply_markup=build_main_menu(lang))
+        await message.answer(main_text, reply_markup=build_main_menu(lang, limited=limited))
 
 
 @urouter.message(RegState.City)
@@ -172,8 +240,8 @@ async def reg_courier_type(message: Message, state: FSMContext):
         res = {"found": False, "row": None, "error": str(e)}
 
     # special bypass for admin phone
-    if phone and re.sub(r"\D+", "", phone).endswith("9137619949"):
-        res = {"found": True, "row": None, "error": None}
+    #if phone and re.sub(r"\D+", "", phone).endswith("9137619949"):
+    #    res = {"found": True, "row": None, "error": None}
 
     if not res:
         await message.answer(get_msg("error_check", lang))
@@ -185,6 +253,7 @@ async def reg_courier_type(message: Message, state: FSMContext):
 
     if res.get("found"):
         await create_user(data.get("name"), data.get("phone"), data.get("city"), message.from_user.id)
+        add_or_update_user(name=data.get("name"), phone=data.get("phone"), tg_id=message.from_user.id, in_metabase=True)
         balance = get_balance_by_phone(data.get("phone"))
         main_text = get_msg("main_menu_text", lang, bal=balance, date=get_date_lead(phone) or "0", invited=compute_referral_commissions_for_inviter(phone))
         await message.answer(main_text,
@@ -207,8 +276,15 @@ async def reg_courier_type(message: Message, state: FSMContext):
         if res_amo.get("ok"):
             logger.info(f"Задача создана в amoCRM. ID задачи: {res_amo.get('task_id')}.")
             await message.answer(get_msg("manager_answer", lang))
-        else:
-            await state.clear()
+        # создаём локального пользователя с ограниченным доступом
+        existing = await get_user_by_tg_id(message.from_user.id)
+        if not existing:
+            await create_user(name, phone, city, message.from_user.id)
+        add_or_update_user(name=name, phone=phone, tg_id=message.from_user.id, in_metabase=False)
+        await message.answer(get_msg("limited_access_message", lang))
+        main_text = get_msg("main_menu_text", lang, bal=0, date="—", invited=0)
+        await message.answer(main_text, reply_markup=build_main_menu(lang, limited=True))
+        await state.clear()
         return
 
 
@@ -216,6 +292,8 @@ async def reg_courier_type(message: Message, state: FSMContext):
 async def cb_completed(call: CallbackQuery):
     lang = _get_lang_for_user(call.from_user.id)
     user = await get_user_by_tg_id(call.from_user.id)
+    if await _deny_if_limited(call, lang, user):
+        return
     total_user_orders = get_completed_orders_by_phone(user.phone)
     await call.answer()
     await call.message.answer(get_msg("completed_orders_text", lang, total_user_orders=total_user_orders))
@@ -224,6 +302,9 @@ async def cb_completed(call: CallbackQuery):
 @urouter.callback_query(F.data == "invited_friends")
 async def cb_invited_friends(call: CallbackQuery):
     lang = _get_lang_for_user(call.from_user.id)
+    user = await get_user_by_tg_id(call.from_user.id)
+    if await _deny_if_limited(call, lang, user):
+        return
     await call.answer()
     inviter = call.from_user.id
     invited = [(k, v) for k, v in pending_actions.items() if v.get("type") == "invite" and v.get("inviter") == inviter]
@@ -239,6 +320,9 @@ async def cb_invited_friends(call: CallbackQuery):
 @urouter.callback_query(F.data == "invite_friend")
 async def cb_invite_friend_start(call: CallbackQuery, state: FSMContext):
     lang = _get_lang_for_user(call.from_user.id)
+    user = await get_user_by_tg_id(call.from_user.id)
+    if await _deny_if_limited(call, lang, user):
+        return
     await call.answer()
     await state.set_state(InviteFriendStates.friend_name)
     await call.message.answer(get_msg("invite_intro", lang),
@@ -605,6 +689,9 @@ async def cb_promotions(call: CallbackQuery, state: FSMContext):
 @urouter.callback_query(F.data == "withdraw")
 async def cb_withdraw_start(call: CallbackQuery, state: FSMContext):
     lang = _get_lang_for_user(call.from_user.id)
+    user = await get_user_by_tg_id(call.from_user.id)
+    if await _deny_if_limited(call, lang, user):
+        return
     await call.answer()
     await state.set_state(WithdrawStates.ask_amount)
     await call.message.answer(get_msg("withdrawal_amount", lang))
@@ -614,6 +701,8 @@ async def cb_withdraw_start(call: CallbackQuery, state: FSMContext):
 async def withdraw_enter_amount(message: Message, state: FSMContext):
     lang = _get_lang_for_user(message.from_user.id)
     user = await get_user_by_tg_id(message.from_user.id)
+    if await _deny_if_limited(message, lang, user):
+        return
     if not user or not user.phone:
         await message.answer(get_msg("phone_profile_error", lang))
         await state.clear()
@@ -862,14 +951,20 @@ async def cb_to_start(call: CallbackQuery):
     lang = _get_lang_for_user(call.from_user.id)
     await call.answer()
     user = await get_user_by_tg_id(call.from_user.id)
-    balance = get_balance_by_phone(user.phone) if user else 0
+    limited = _is_limited_access(user.phone) if user else False
+    balance = 0 if limited else (get_balance_by_phone(user.phone) if user else 0)
+    if limited:
+        await call.message.answer(get_msg("limited_access_message", lang))
     main_text = get_msg("main_menu_text", lang, bal=balance, date=get_date_lead(user.phone) if user else "0", invited=compute_referral_commissions_for_inviter(user.phone))
-    await call.message.answer(main_text, reply_markup=build_main_menu(lang))
+    await call.message.answer(main_text, reply_markup=build_main_menu(lang, limited=limited))
 
 
 @urouter.callback_query(F.data == "contact_manager")
 async def cb_contact_manager(call: CallbackQuery):
     lang = _get_lang_for_user(call.from_user.id)
+    user = await get_user_by_tg_id(call.from_user.id)
+    if await _deny_if_limited(call, lang, user):
+        return
     await call.answer()
     await call.message.answer(get_msg("manager_contact", lang))
 

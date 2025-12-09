@@ -412,3 +412,29 @@ async def create_chat_and_task_for_invited_async(name: str, phone: str, inviter_
 
     out["ok"] = True if out.get("contact_id") and (out.get("task_id") or out.get("chat")) else False
     return out
+
+def get_all_leads_sync(session: AmoCRMSession, limit: int = 250):
+    leads = []
+    page = 1
+    while True:
+        url = _full_url("api/v4/leads")
+        params = {"page": page, "limit": limit}
+        try:
+            r = session.session.get(url, params=params, timeout=10)
+        except requests.RequestException:
+            logger.exception("Network error while fetching leads")
+            break
+        res = session._handle_response(r)
+        if not res["ok"]:
+            logger.error("Error fetching leads: %s", res["text"])
+            break
+        data = res["json"]
+        items = data.get("_embedded", {}).get("leads", []) if data else []
+        if not items:
+            break
+        leads.extend(items)
+        page += 1
+        time.sleep(0.2)  # чтобы не попасть под лимиты
+    return leads
+
+
