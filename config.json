@@ -740,5 +740,40 @@
     "tg": "Дастрасии шумо ҳоло маҳдуд аст. Танҳо Wi‑Fi ва аксияҳои ҷорӣ дастрасанд. Барои дастрасии пурра ҳадди ақал 1 фармоишро иҷро кунед.",
     "ky": "Сиздин мүмкүнчүлүк азырынча чектелген. Wi‑Fi жана учурдагы акциялар гана жеткиликтүү. Толук жетки алуу үчүн жок дегенде 1 заказ аткарыңыз.",
     "en": "Your access is limited for now. Only Wi‑Fi and current promos are available. Complete at least one order for full access."
+  },
+  "btn_export_metabase": {
+    "ru": "📤 Выгрузить Metabase",
+    "uz": "📤 Metabase eksporti",
+    "tg": "📤 Содироти Metabase",
+    "ky": "📤 Metabase экспорт",
+    "en": "📤 Export Metabase"
+  },
+  "metabase_export_started": {
+    "ru": "Запускаю выгрузку Metabase → Google Sheets, это может занять 1–2 минуты…",
+    "uz": "Metabase ma'lumotlari Google Sheets-ga yuklanmoqda, 1–2 daqiqa ketishi mumkin…",
+    "tg": "Боркунии Metabase ба Google Sheets оғоз шуд, метавонад 1–2 дақиқа тӯл кашад…",
+    "ky": "Metabase маалыматтары Google Sheetsке жүктөлүүдө, 1–2 мүнөт кетиши мүмкүн…",
+    "en": "Starting Metabase → Google Sheets export, this may take 1–2 minutes…"
+  },
+  "metabase_export_done": {
+    "ru": "Готово. Выгружено {count} строк в лист «ВСЕ КАНДИДАТЫ В METABASE».",
+    "uz": "Tayyor. \"ВСЕ КАНДИДАТЫ В METABASE\" varag'iga {count} qator yozildi.",
+    "tg": "Тайёр. {count} сатр ба варақи «ВСЕ КАНДИДАТЫ В METABASE» ворид шуд.",
+    "ky": "Даяр. «ВСЕ КАНДИДАТЫ В METABASE» барагына {count} сап жазылды.",
+    "en": "Done. Wrote {count} rows to sheet “ВСЕ КАНДИДАТЫ В METABASE”."
+  },
+  "metabase_export_error": {
+    "ru": "Не удалось выгрузить данные: {reason}",
+    "uz": "Ma'lumotlarni yuklab bo'lmadi: {reason}",
+    "tg": "Боркунии маълумот ноком шуд: {reason}",
+    "ky": "Маалыматты жүктөө мүмкүн болбоду: {reason}",
+    "en": "Failed to export data: {reason}"
+  },
+  "metabase_export_denied": {
+    "ru": "Нет прав для выгрузки.",
+    "uz": "Eksport uchun huquqingiz yo'q.",
+    "tg": "Шумо ҳуқуқи боркунӣ надоред.",
+    "ky": "Экспортко уруксат жок.",
+    "en": "No permission to run the export."
   }
 }

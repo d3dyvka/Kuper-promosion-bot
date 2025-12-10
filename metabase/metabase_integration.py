@@ -200,6 +200,36 @@ def courier_exists(phone: str, timeout: int = 15):
     return {"found": False, "row": None, "error": None}
 
 
+def fetch_all_metabase_rows(timeout: int = 30) -> List[Dict[str, Any]]:
+    """
+    Возвращает все строки карточки Metabase в виде списка dict.
+    """
+    token = update_metabase_token()
+    url = f"{BASE}/api/card/{CARD_ID}/query/json"
+    headers = {"X-Metabase-Session": token, "Content-Type": "application/json"}
+    payload = {"parameters": [], "ignore_cache": True}
+    resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+    resp.raise_for_status()
+    data = resp.json()
+
+    rows: List[Dict[str, Any]] = []
+    if isinstance(data, list):
+        for obj in data:
+            if isinstance(obj, dict):
+                rows.append(obj)
+        return rows
+
+    if isinstance(data, dict) and data.get("data"):
+        cols = [c.get("name") for c in data["data"].get("cols", [])]
+        raw_rows = data["data"].get("rows", []) or []
+        for row in raw_rows:
+            if not isinstance(row, (list, tuple)):
+                continue
+            obj = {cols[i]: row[i] for i in range(min(len(cols), len(row)))}
+            rows.append(obj)
+    return rows
+
+
 def _parse_date_lead(value) -> Optional[datetime.datetime]:
     if not value:
         return None

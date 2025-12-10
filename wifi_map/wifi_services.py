@@ -1,11 +1,14 @@
 import json
-import logging
+from loguru import logger
 import os
 from typing import Any, Dict, List
 
-logger = logging.getLogger("wifi_map")
-logger.addHandler(logging.StreamHandler())
-logger.setLevel(logging.INFO)
+import requests
+from decouple import config
+
+WIGLE_API_NAME = config("WIGLE_API_NAME", default="")
+WIGLE_API_TOKEN = config("WIGLE_API_TOKEN", default="")
+WIGLE_API_URL = "https://api.wigle.net/api/v2/network/search"
 
 
 def _default_wifi_points() -> List[Dict[str, Any]]:
@@ -102,13 +105,115 @@ def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return R * c
 
 
+import time
+
+
+def _query_wigle_near(lat: float, lon: float, radius_m: float = 50.0, max_results: int = 25, max_retries: int = 3) -> list[dict]:
+    """
+    Запрашивает у WiGLE открытые сети рядом с точкой.
+    Добавлена обработка 429 с повторными попытками (экспоненциальный бэкофф).
+    """
+    if not WIGLE_API_NAME or not WIGLE_API_TOKEN:
+        logger.debug("WiGLE API creds not configured; skipping remote search")
+        return []
+
+    from math import cos, radians
+
+    delta_lat = radius_m / 111320.0
+    cos_lat = cos(radians(lat)) or 1.0
+    delta_lon = radius_m / (111320.0 * cos_lat)
+
+    lat1, lat2 = lat - delta_lat, lat + delta_lat
+    lon1, lon2 = lon - delta_lon, lon + delta_lon
+
+    params = {
+        "latrange1": f"{lat1:.6f}",
+        "latrange2": f"{lat2:.6f}",
+        "longrange1": f"{lon1:.6f}",
+        "longrange2": f"{lon2:.6f}",
+        "freenet": "true",
+        "paynet": "false",
+        "onlymine": "false",
+        "resultsPerPage": int(max_results),
+    }
+    auth = (WIGLE_API_NAME, WIGLE_API_TOKEN)
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = requests.get(WIGLE_API_URL, params=params, auth=auth, timeout=10)
+            if resp.status_code == 200:
+                try:
+                    data = resp.json()
+                except Exception:
+                    logger.exception("WiGLE response is not JSON")
+                    return []
+                if not isinstance(data, dict) or not data.get("success", True):
+                    logger.warning("WiGLE API success flag is false: {}", data)
+                    return []
+                results = data.get("results") or []
+                return [r for r in results if isinstance(r, dict)]
+
+            elif resp.status_code == 429:
+                retry_after = int(resp.headers.get("Retry-After", 5))  # сек, если WiGLE вернул
+                delay = retry_after * attempt  # экспоненциальный бэкофф
+                logger.warning("WiGLE API rate limit exceeded (429), retrying in {} seconds...", delay)
+                time.sleep(delay)
+                continue
+
+            else:
+                logger.warning("WiGLE API returned {}: {:.300}", resp.status_code, resp.text)
+                return []
+
+        except requests.RequestException:
+            logger.exception("Error querying WiGLE API")
+            time.sleep(2 * attempt)
+            continue
+
+    logger.error("WiGLE API retries exhausted")
+    return []
+
+
+
 def find_wifi_near_location(lat: float, lon: float, radius_m: float = 50.0) -> List[Dict[str, Any]]:
     """
     Возвращает список точек Wi‑Fi, попадающих в радиус radius_m от указанной локации.
+    В первую очередь используем WiGLE API, при ошибке/отсутствии данных — локальный список.
     В ответ добавляется поле distance_m.
     """
-    points = get_available_wifi_points()
-    nearby = []
+    # 1. Попытка получить сети через WiGLE
+    wigle_raw = _query_wigle_near(lat, lon, radius_m=radius_m, max_results=50)
+    points: List[Dict[str, Any]] = []
+
+    for r in wigle_raw:
+        try:
+            plat = float(r.get("trilat"))
+            plon = float(r.get("trilong"))
+        except (TypeError, ValueError):
+            continue
+        ssid = (r.get("ssid") or "").strip()
+        # encryption, lasttime и др. можно использовать в описании
+        enc = (r.get("encryption") or "").strip()
+        desc_parts = []
+        if enc:
+            desc_parts.append(f"Шифрование: {enc}")
+        bssid = (r.get("bssid") or "").strip()
+        if bssid:
+            desc_parts.append(f"BSSID: {bssid}")
+        description = "\n".join(desc_parts)
+        points.append(
+            {
+                "name": ssid or "Wi‑Fi сеть",
+                "description": description,
+                "lat": plat,
+                "lon": plon,
+            }
+        )
+
+    # 2. Если WiGLE ничего не вернул (или отключён) — fallback к локальным точкам
+    if not points:
+        points = get_available_wifi_points()
+
+    nearby: List[Dict[str, Any]] = []
     for p in points:
         try:
             plat = float(p.get("lat"))
@@ -123,4 +228,5 @@ def find_wifi_near_location(lat: float, lon: float, radius_m: float = 50.0) -> L
 
     nearby.sort(key=lambda item: item.get("distance_m", radius_m))
     return nearby
+
 

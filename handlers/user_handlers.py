@@ -2,6 +2,11 @@ import asyncio
 import logging
 import datetime
 import os
+import re
+from typing import Any, Dict, List, Optional
+
+import gspread
+from gspread.utils import rowcol_to_a1
 from aiogram import Router, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
@@ -10,22 +15,21 @@ from aiogram.fsm.context import FSMContext
 from aiogram.utils.formatting import PhoneNumber
 
 from create_bot import bot
-from db.crud import create_user, get_user_by_tg_id
+from db.crud import create_user, get_user_by_tg_id, get_all_users
 from jump.jump_integrations import get_balance_by_phone, perform_withdrawal
 from metabase.metabase_integration import get_completed_orders_by_phone, courier_exists, get_promotions, get_date_lead, \
-    compute_referral_commissions_for_inviter, normalize_phone, courier_data
+    compute_referral_commissions_for_inviter, normalize_phone, courier_data, fetch_all_metabase_rows
 from wifi_map.wifi_services import find_wifi_near_location, get_available_wifi_points
 from users_store import add_or_update_user, is_in_metabase
 from .user_states import RegState, InviteFriendStates, PromoStates, WithdrawStates, WifiStates
 from .services import (
     load_json, contact_kb, location_request_kb,
-    build_main_menu, build_invite_friend_menu, add_person_to_external_sheet, get_msg, manager_withdraw_kb
+    build_main_menu, build_invite_friend_menu, add_person_to_external_sheet, get_msg, manager_withdraw_kb,
+    find_row_by_phone_in_sheet, _load_credentials, SPREADSHEET_ID
 )
 from amocrm.amocrm_integration import find_or_create_contact_and_create_task_async
 from decouple import config
 from loguru import logger
-
-import re
 
 urouter = Router()
 
@@ -34,6 +38,18 @@ pending_actions = {}
 _local_counter = 0
 user_langs = {}
 CONTACT_SCREENSHOT_PATH = "contact_request.png"
+ADMIN_IDS_RAW = config("ADMIN_IDS", default="")
+def _parse_admin_ids(raw: str) -> set[int]:
+    ids = set()
+    for part in (raw or "").split():
+        try:
+            ids.add(int(part.strip()))
+        except Exception:
+            continue
+    return ids
+ADMIN_IDS = _parse_admin_ids(ADMIN_IDS_RAW)
+CANDIDATES_SPREADSHEET_ID = config("CANDIDATES_SPREADSHEET_ID", default=SPREADSHEET_ID)
+CANDIDATES_SHEET_NAME = "ВСЕ КАНДИДАТЫ В METABASE"
 
 
 def _next_local():
@@ -49,15 +65,75 @@ def _get_lang_for_user(tg_id: int) -> str:
         return "ru"
 
 
-def _is_limited_access(phone: str) -> bool:
+def _is_admin(tg_id: int) -> bool:
+    try:
+        return int(tg_id) in ADMIN_IDS
+    except Exception:
+        return False
+
+
+def _normalize_phone_digits(phone: Optional[str]) -> str:
+    if not phone:
+        return ""
+    return re.sub(r"\D+", "", str(phone))
+
+
+async def _find_candidate_row(phone: str) -> Optional[Dict[str, str]]:
+    return await asyncio.to_thread(
+        find_row_by_phone_in_sheet,
+        CANDIDATES_SHEET_NAME,
+        phone,
+        CANDIDATES_SPREADSHEET_ID,
+    )
+
+
+async def _resolve_access(phone: str, name: Optional[str], tg_id: Optional[int]) -> bool:
     """
-    Ограничиваем функционал, если нет подтверждения в Metabase.
+    Обновляет локальное хранилище in_metabase и возвращает limited-флаг.
+    Порядок:
+      1) если есть в Google Sheet "ВСЕ КАНДИДАТЫ В METABASE" — полный доступ
+      2) иначе проверяем Metabase
+      3) иначе ограниченный доступ
+    """
+    # 1) Google Sheet
+    candidate_row = await _find_candidate_row(phone)
+    if candidate_row:
+        derived_name = name or candidate_row.get("ФИО партнера") or candidate_row.get("ФИО") or candidate_row.get("fio")
+        add_or_update_user(name=derived_name, phone=phone, tg_id=tg_id or 0, in_metabase=True)
+        return False
+
+    # 2) Metabase
+    res = await asyncio.to_thread(courier_exists, phone=phone)
+    if res.get("found"):
+        data = await asyncio.to_thread(courier_data, phone=phone)
+        derived_name = name
+        if not derived_name and isinstance(data, dict):
+            derived_name = data.get("ФИО партнера") or data.get("ФИО") or data.get("fio")
+        add_or_update_user(name=derived_name, phone=phone, tg_id=tg_id or 0, in_metabase=True)
+        return False
+
+    # 3) Ограниченный доступ
+    add_or_update_user(name=name, phone=phone, tg_id=tg_id or 0, in_metabase=False)
+    return True
+
+
+async def _is_limited_access(phone: str, name: Optional[str] = None, tg_id: Optional[int] = None) -> bool:
+    """
+    Ограничиваем функционал, если нет подтверждения в Metabase и в таблице кандидатов.
     """
     metabase_flag = is_in_metabase(phone)
     if metabase_flag is None:
-        # нет сведений — считаем неограниченным (старые пользователи)
+        # нет сведений — определяем и сохраняем
+        return await _resolve_access(phone, name, tg_id)
+    if metabase_flag:
         return False
-    return not bool(metabase_flag)
+    # Был ограничен — перепроверяем таблицу кандидатов
+    candidate_row = await _find_candidate_row(phone)
+    if candidate_row:
+        derived_name = name or candidate_row.get("ФИО партнера") or candidate_row.get("ФИО") or candidate_row.get("fio")
+        add_or_update_user(name=derived_name, phone=phone, tg_id=tg_id or 0, in_metabase=True)
+        return False
+    return True
 
 
 async def _send_contact_screenshot(message: Message):
@@ -96,7 +172,7 @@ async def _deny_if_limited(entity, lang: str, user) -> bool:
     if not phone:
         await _send(get_msg("phone_profile_error", lang))
         return True
-    if _is_limited_access(phone):
+    if await _is_limited_access(phone, getattr(user, "fio", None), getattr(user, "tg_id", None)):
         await _send(get_msg("limited_access_message", lang))
         return True
     return False
@@ -139,14 +215,14 @@ async def cb_set_language(call: CallbackQuery, state: FSMContext):
     # Continue depending on whether user exists
     user = await get_user_by_tg_id(user_id)
     if user:
-        limited = _is_limited_access(user.phone)
+        limited = await _is_limited_access(user.phone, getattr(user, "fio", None), user_id)
         balance = 0 if limited else (get_balance_by_phone(user.phone) if user else 0)
         date = get_date_lead(user.phone) if user and getattr(user, "phone", None) else None
         add_or_update_user(name=getattr(user, "fio", None), phone=user.phone, tg_id=user_id, in_metabase=not limited)
         main_text = get_msg("main_menu_text", lang, bal=balance, date=date or "0", invited=compute_referral_commissions_for_inviter(user.phone))
         if limited:
             await call.message.answer(get_msg("limited_access_message", lang))
-        await call.message.answer(main_text, reply_markup=build_main_menu(lang, limited=limited))
+        await call.message.answer(main_text, reply_markup=build_main_menu(lang, limited=limited, is_admin=_is_admin(user_id)))
     else:
         # ask for FIO in selected language
         # отправляем скриншот вместе с текстом, если файл доступен
@@ -173,17 +249,32 @@ async def reg_contact(message: Message, state: FSMContext):
     if phone:
         logger.info(f"New phone number {phone} for contact {contact}")
 
-    res = courier_exists(phone=phone)
+    # 1) сначала ищем в таблице кандидатов
+    candidate_row = await _find_candidate_row(phone)
+    if candidate_row:
+        derived_name = candidate_row.get("ФИО партнера") or candidate_row.get("ФИО") or candidate_row.get("fio") or contact.first_name
+        city = candidate_row.get("Город") or candidate_row.get("город")
+        existing = await get_user_by_tg_id(message.from_user.id)
+        if not existing:
+            await create_user(fio=derived_name or "—", phone=phone, city=city, tg_id=message.from_user.id)
+        add_or_update_user(name=derived_name, phone=phone, tg_id=message.from_user.id, in_metabase=True)
+        balance = get_balance_by_phone(phone) if phone else 0
+        main_text = get_msg("main_menu_text", lang, bal=balance, date=get_date_lead(phone) or "0", invited=compute_referral_commissions_for_inviter(phone))
+        await message.answer(main_text, reply_markup=build_main_menu(lang, limited=False, is_admin=_is_admin(message.from_user.id)))
+        await state.clear()
+        return
 
+    # 2) иначе проверяем Metabase
+    res = await asyncio.to_thread(courier_exists, phone=phone)
     if res.get("found"):
-        data = courier_data(phone=phone)
+        data = await asyncio.to_thread(courier_data, phone=phone)
         if data is not None:
             await create_user(fio=data.get("ФИО партнера"), phone=phone, city=data.get("Город"), tg_id=message.from_user.id)
             add_or_update_user(name=data.get("ФИО партнера"), phone=phone, tg_id=message.from_user.id, in_metabase=True)
             logger.info(f"New user created {phone} {data.get('ФИО партнера')}")
             balance = get_balance_by_phone(phone) if phone else 0
             main_text = get_msg("main_menu_text", lang, bal=balance, date=get_date_lead(phone) or "0", invited=compute_referral_commissions_for_inviter(phone))
-            await message.answer(main_text, reply_markup=build_main_menu(lang))
+            await message.answer(main_text, reply_markup=build_main_menu(lang, limited=False, is_admin=_is_admin(message.from_user.id)))
         else:
             add_or_update_user(name=None, phone=phone, tg_id=message.from_user.id, in_metabase=True)
         await state.clear()
@@ -200,13 +291,13 @@ async def menu(message: Message, state: FSMContext):
     lang = _get_lang_for_user(message.from_user.id)
     await state.clear()
     user = await get_user_by_tg_id(message.from_user.id)
-    limited = _is_limited_access(user.phone) if user else False
+    limited = await _is_limited_access(user.phone, getattr(user, "fio", None), message.from_user.id) if user else False
     balance = 0 if limited else (get_balance_by_phone(user.phone) if user else 0)
     if user:
         if limited:
             await message.answer(get_msg("limited_access_message", lang))
         main_text = get_msg("main_menu_text", lang, bal=balance, date=get_date_lead(user.phone) or "0", invited=compute_referral_commissions_for_inviter(user.phone))
-        await message.answer(main_text, reply_markup=build_main_menu(lang, limited=limited))
+        await message.answer(main_text, reply_markup=build_main_menu(lang, limited=limited, is_admin=_is_admin(message.from_user.id)))
 
 
 @urouter.message(RegState.City)
@@ -234,7 +325,7 @@ async def reg_courier_type(message: Message, state: FSMContext):
 
     await message.answer(get_msg("checking_in_park", lang))
     try:
-        res = courier_exists(phone=phone)
+        res = await asyncio.to_thread(courier_exists, phone=phone)
     except Exception as e:
         logger.exception("Ошибка при проверке Metabase")
         res = {"found": False, "row": None, "error": str(e)}
@@ -257,7 +348,7 @@ async def reg_courier_type(message: Message, state: FSMContext):
         balance = get_balance_by_phone(data.get("phone"))
         main_text = get_msg("main_menu_text", lang, bal=balance, date=get_date_lead(phone) or "0", invited=compute_referral_commissions_for_inviter(phone))
         await message.answer(main_text,
-                             reply_markup=build_main_menu(lang))
+                             reply_markup=build_main_menu(lang, limited=False, is_admin=_is_admin(message.from_user.id)))
         await state.clear()
         return
     else:
@@ -283,7 +374,7 @@ async def reg_courier_type(message: Message, state: FSMContext):
         add_or_update_user(name=name, phone=phone, tg_id=message.from_user.id, in_metabase=False)
         await message.answer(get_msg("limited_access_message", lang))
         main_text = get_msg("main_menu_text", lang, bal=0, date="—", invited=0)
-        await message.answer(main_text, reply_markup=build_main_menu(lang, limited=True))
+        await message.answer(main_text, reply_markup=build_main_menu(lang, limited=True, is_admin=_is_admin(message.from_user.id)))
         await state.clear()
         return
 
@@ -510,6 +601,108 @@ def _split_text_chunks(text: str, limit: int = 3900) -> list:
     if current:
         parts.append(current.rstrip())
     return parts
+
+
+def _normalize_sheet_value(val: Any) -> str:
+    if val is None:
+        return ""
+    if isinstance(val, (datetime.datetime, datetime.date)):
+        return val.isoformat()
+    return str(val)
+
+
+def _prepare_candidates_dataset(metabase_rows: List[Dict[str, Any]], local_users: List[Any]) -> (List[str], List[List[str]]):
+    headers: List[str] = []
+
+    def add_header(h):
+        if h is None:
+            return
+        hstr = str(h).strip()
+        if hstr and hstr not in headers:
+            headers.append(hstr)
+
+    for row in metabase_rows:
+        if isinstance(row, dict):
+            for k in row.keys():
+                add_header(k)
+
+    extra_fields = ["source", "local_id", "tg_id", "ФИО партнера", "ФИО", "Телефон", "phone", "Город", "city", "created_at"]
+    for f in extra_fields:
+        add_header(f)
+
+    records: List[Dict[str, Any]] = []
+
+    for row in metabase_rows:
+        if not isinstance(row, dict):
+            continue
+        rec = {k: _normalize_sheet_value(v) for k, v in row.items()}
+        rec.setdefault("source", "metabase")
+        records.append(rec)
+
+    for u in local_users or []:
+        rec = {
+            "source": "local_db",
+            "local_id": getattr(u, "id", None),
+            "tg_id": getattr(u, "tg_id", None),
+            "ФИО партнера": getattr(u, "fio", None),
+            "ФИО": getattr(u, "fio", None),
+            "Телефон": getattr(u, "phone", None),
+            "phone": getattr(u, "phone", None),
+            "Город": getattr(u, "city", None),
+            "city": getattr(u, "city", None),
+            "created_at": getattr(u, "created_at", None),
+        }
+        records.append({k: _normalize_sheet_value(v) for k, v in rec.items()})
+
+    table: List[List[str]] = []
+    for rec in records:
+        row_values = []
+        for h in headers:
+            row_values.append(_normalize_sheet_value(rec.get(h)))
+        table.append(row_values)
+    return headers, table
+
+
+def _write_candidates_sheet(headers: List[str], table: List[List[str]]):
+    creds = _load_credentials()
+    client = gspread.authorize(creds)
+    sheet = client.open_by_key(CANDIDATES_SPREADSHEET_ID or SPREADSHEET_ID)
+    try:
+        ws = sheet.worksheet(CANDIDATES_SHEET_NAME)
+    except Exception:
+        ws = sheet.add_worksheet(title=CANDIDATES_SHEET_NAME, rows=str(max(len(table) + 10, 1000)),
+                                 cols=str(max(len(headers) + 5, 20)))
+    ws.clear()
+    payload = [headers] + table
+    if not payload:
+        return
+    # auto-range from A1 to bottom-right
+    end_cell = rowcol_to_a1(len(payload), len(headers)) if headers else "A1"
+    ws.update(f"A1:{end_cell}", payload, value_input_option="USER_ENTERED")
+
+
+async def _export_metabase_dataset() -> int:
+    metabase_rows = await asyncio.to_thread(fetch_all_metabase_rows)
+    local_users = await get_all_users()
+    headers, table = _prepare_candidates_dataset(metabase_rows, local_users)
+    await asyncio.to_thread(_write_candidates_sheet, headers, table)
+    return len(table)
+
+
+@urouter.callback_query(F.data == "export_metabase")
+async def cb_export_metabase(call: CallbackQuery):
+    lang = _get_lang_for_user(call.from_user.id)
+    if not _is_admin(call.from_user.id):
+        await call.answer(get_msg("metabase_export_denied", lang), show_alert=True)
+        return
+    await call.answer()
+    await call.message.answer(get_msg("metabase_export_started", lang))
+    try:
+        total = await _export_metabase_dataset()
+        await call.message.answer(get_msg("metabase_export_done", lang, count=total))
+    except Exception as e:
+        logger.exception("Failed to export metabase dataset")
+        await call.message.answer(get_msg("metabase_export_error", lang, reason=str(e)))
 
 
 @urouter.callback_query(F.data == "promotions")
@@ -951,12 +1144,12 @@ async def cb_to_start(call: CallbackQuery):
     lang = _get_lang_for_user(call.from_user.id)
     await call.answer()
     user = await get_user_by_tg_id(call.from_user.id)
-    limited = _is_limited_access(user.phone) if user else False
+    limited = await _is_limited_access(user.phone, getattr(user, "fio", None), call.from_user.id) if user else False
     balance = 0 if limited else (get_balance_by_phone(user.phone) if user else 0)
     if limited:
         await call.message.answer(get_msg("limited_access_message", lang))
     main_text = get_msg("main_menu_text", lang, bal=balance, date=get_date_lead(user.phone) if user else "0", invited=compute_referral_commissions_for_inviter(user.phone))
-    await call.message.answer(main_text, reply_markup=build_main_menu(lang, limited=limited))
+    await call.message.answer(main_text, reply_markup=build_main_menu(lang, limited=limited, is_admin=_is_admin(call.from_user.id)))
 
 
 @urouter.callback_query(F.data == "contact_manager")

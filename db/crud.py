@@ -32,3 +32,9 @@ async def delete_user_by_phone(phone: str):
 async def create_friend(inviter_id: int, inviter_phone: str, fio: str, phone: str, city: str = None, role: str = None):
     async with get_session() as session:
         obj = InviteFriends(name=fio, phone=phone, city=city, role=role)
+
+
+async def get_all_users():
+    async with get_session() as session:
+        result = await session.execute(select(Users))
+        return list(result.scalars().all())

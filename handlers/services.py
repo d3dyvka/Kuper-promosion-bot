@@ -37,22 +37,31 @@ def get_msg(key: str, lang: str = "ru", **kwargs) -> str:
     return text
 
 
-def build_main_menu(lang: str = "ru", limited: bool = False) -> InlineKeyboardMarkup:
+def build_main_menu(lang: str = "ru", limited: bool = False, is_admin: bool = False) -> InlineKeyboardMarkup:
     """
     Если limited=True — показываем только Wi‑Fi и промо.
     """
     if limited:
-        return InlineKeyboardMarkup(inline_keyboard=[
+        buttons = [
             [InlineKeyboardButton(text=get_msg("btn_promotions", lang), callback_data="promotions")],
             [InlineKeyboardButton(text=get_msg("btn_wifi_map", lang), callback_data="wifi_map")],
-        ])
-    return InlineKeyboardMarkup(inline_keyboard=[
+        ]
+        if is_admin:
+            buttons.append([InlineKeyboardButton(text=get_msg("btn_export_metabase", lang),
+                                                 callback_data="export_metabase")])
+        return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+    buttons = [
         [InlineKeyboardButton(text=get_msg("btn_completed_orders", lang), callback_data="completed_orders")],
         [InlineKeyboardButton(text=get_msg("btn_invite_friend", lang), callback_data="invite_friend")],
         [InlineKeyboardButton(text=get_msg("btn_promotions", lang), callback_data="promotions")],
         [InlineKeyboardButton(text=get_msg("btn_withdraw", lang), callback_data="withdraw")],
         [InlineKeyboardButton(text=get_msg("btn_wifi_map", lang), callback_data="wifi_map")],
-    ])
+    ]
+    if is_admin:
+        buttons.append([InlineKeyboardButton(text=get_msg("btn_export_metabase", lang),
+                                             callback_data="export_metabase")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def build_invite_friend_menu(lang: str = "ru") -> InlineKeyboardMarkup:
@@ -152,18 +161,29 @@ def _load_credentials() -> Credentials:
         return creds
     raise RuntimeError("Google service account not configured. Set GOOGLE_SA_FILE.")  # noqa: WPS500
 
-def _get_worksheet(title: str):
+def _get_worksheet(
+        title: str,
+        spreadsheet_id: Optional[str] = None,
+        create_if_missing: bool = False,
+        rows: str = "1000",
+        cols: str = "20",
+):
     creds = _load_credentials()
     client = gspread.authorize(creds)
-    sheet = client.open_by_key(SPREADSHEET_ID)
+    sheet = client.open_by_key(spreadsheet_id or SPREADSHEET_ID)
     try:
         return sheet.worksheet(title)
     except Exception:
         logger.exception("Worksheet '%s' not found", title)
+        if create_if_missing:
+            try:
+                return sheet.add_worksheet(title=title, rows=rows, cols=cols)
+            except Exception:
+                logger.exception("Failed to create worksheet '%s'", title)
         return None
 
-def _get_worksheet_values_by_title(title: str) -> Optional[List[List[str]]]:
-    ws = _get_worksheet(title)
+def _get_worksheet_values_by_title(title: str, spreadsheet_id: Optional[str] = None) -> Optional[List[List[str]]]:
+    ws = _get_worksheet(title, spreadsheet_id=spreadsheet_id)
     if not ws:
         return None
     return ws.get_all_values()
@@ -549,3 +569,42 @@ def mark_invite_friend_payment(sheet_row: int, payout: float, status: str, first
     except Exception:
         logger.exception("Failed to mark invite friend payment on row %s", sheet_row)
         return False
+
+
+def find_row_by_phone_in_sheet(title: str, phone: str, spreadsheet_id: Optional[str] = None) -> Optional[Dict[str, str]]:
+    """
+    Ищет строку по телефону в указанном листе (по первому столбцу, содержащему 'тел' или 'phone').
+    Возвращает dict {header: value} или None.
+    """
+    ws = _get_worksheet(title, spreadsheet_id=spreadsheet_id)
+    if not ws:
+        return None
+    try:
+        vals = ws.get_all_values()
+    except Exception:
+        logger.exception("Error reading sheet '%s'", title)
+        return None
+    if not vals or len(vals) < 2:
+        return None
+
+    headers = vals[0]
+    norm_headers = [(h or "").strip().lower() for h in headers]
+    phone_col = None
+    for idx, h in enumerate(norm_headers):
+        if "тел" in h or "phone" in h:
+            phone_col = idx
+            break
+
+    target = _normalize_phone(phone)[-10:]
+    if not target:
+        return None
+
+    for row in vals[1:]:
+        try:
+            cell = row[phone_col] if phone_col is not None and phone_col < len(row) else ""
+            cell_norm = _normalize_phone(cell)[-10:]
+            if cell_norm and target.endswith(cell_norm):
+                return {headers[i]: (row[i] if i < len(row) else "") for i in range(len(headers))}
+        except Exception:
+            continue
+    return None
