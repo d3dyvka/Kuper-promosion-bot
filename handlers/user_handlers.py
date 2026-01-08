@@ -1,5 +1,4 @@
 import asyncio
-import logging
 import datetime
 import os
 import re
@@ -7,6 +6,7 @@ from typing import Any, Dict, List, Optional
 
 import gspread
 from gspread.utils import rowcol_to_a1
+import aiohttp
 from aiogram import Router, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
@@ -18,7 +18,7 @@ from create_bot import bot
 from db.crud import create_user, get_user_by_tg_id, get_all_users
 from jump.jump_integrations import get_balance_by_phone, perform_withdrawal
 from metabase.metabase_integration import get_completed_orders_by_phone, courier_exists, get_promotions, get_date_lead, \
-    compute_referral_commissions_for_inviter, normalize_phone, courier_data, fetch_all_metabase_rows
+    compute_referral_commissions_for_inviter, courier_data, fetch_all_metabase_rows
 from wifi_map.wifi_services import find_wifi_near_location, get_available_wifi_points
 from users_store import add_or_update_user, is_in_metabase
 from .user_states import RegState, InviteFriendStates, PromoStates, WithdrawStates, WifiStates
@@ -70,12 +70,6 @@ def _is_admin(tg_id: int) -> bool:
         return int(tg_id) in ADMIN_IDS
     except Exception:
         return False
-
-
-def _normalize_phone_digits(phone: Optional[str]) -> str:
-    if not phone:
-        return ""
-    return re.sub(r"\D+", "", str(phone))
 
 
 async def _find_candidate_row(phone: str) -> Optional[Dict[str, str]]:
@@ -178,6 +172,44 @@ async def _deny_if_limited(entity, lang: str, user) -> bool:
     return False
 
 
+async def _send_registration_post(phone: str, full_name: Optional[str] = None, city: Optional[str] = None, position: Optional[str] = None):
+    """
+    Отправляет POST запрос на эндпоинт при регистрации пользователя.
+    """
+    # Формируем данные в формате form-data, как ожидает эндпоинт
+    data = aiohttp.FormData()
+    data.add_field('phone', phone)
+    data.add_field('full_name', full_name or f'Сделка #{phone}')
+    if city:
+        data.add_field('city', city)
+    if position:
+        data.add_field('position', position)
+    data.add_field('respond', 'False')
+    data.add_field('is_from_amocrm', 'False')
+    
+    endpoint = 'http://90.156.205.252:8000/add_candidate_selenium/'
+    
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(endpoint, data=data, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                if response.status == 200:
+                    logger.info(f"POST запрос успешно отправлен на {endpoint} для телефона {phone}")
+                else:
+                    response_text = await response.text()
+                    logger.warning(f"POST запрос на {endpoint} вернул статус {response.status} для телефона {phone}. Ответ: {response_text}")
+        except Exception as e:
+            logger.exception(f"Ошибка при отправке POST запроса на {endpoint} для телефона {phone}: {e}")
+
+
+FIRST_REGISTRATION_MESSAGE = """Что делать дальше:
+ 
+1.📱 Скачай основное приложение для работы (Shopper App)
+Android: https://kuper.ru/rabota/app
+ 
+2. 🎓 Зайди в Shopper по своему номеру телефона
+→ Пройди «Курс новичка» (всего 10 минут!)"""
+
+
 MANAGER_CHAT_ID = config('MANAGER_CHAT_ID')
 EXTERNAL_SPREADSHEET_ID = config('EXTERNAL_SPREADSHEET_ID')
 EXTERNAL_SHEET_NAME = config('EXTERNAL_SHEET_NAME')
@@ -255,9 +287,17 @@ async def reg_contact(message: Message, state: FSMContext):
         derived_name = candidate_row.get("ФИО партнера") or candidate_row.get("ФИО") or candidate_row.get("fio") or contact.first_name
         city = candidate_row.get("Город") or candidate_row.get("город")
         existing = await get_user_by_tg_id(message.from_user.id)
+        is_first_registration = not existing
         if not existing:
             await create_user(fio=derived_name or "—", phone=phone, city=city, tg_id=message.from_user.id)
         add_or_update_user(name=derived_name, phone=phone, tg_id=message.from_user.id, in_metabase=True)
+        
+        # НЕ отправляем POST запросы, если пользователь найден в таблице кандидатов
+        
+        # Показываем специальное сообщение для новых пользователей
+        if is_first_registration:
+            await message.answer(FIRST_REGISTRATION_MESSAGE)
+        
         balance = get_balance_by_phone(phone) if phone else 0
         main_text = get_msg("main_menu_text", lang, bal=balance, date=get_date_lead(phone) or "0", invited=compute_referral_commissions_for_inviter(phone))
         await message.answer(main_text, reply_markup=build_main_menu(lang, limited=False, is_admin=_is_admin(message.from_user.id)))
@@ -269,9 +309,18 @@ async def reg_contact(message: Message, state: FSMContext):
     if res.get("found"):
         data = await asyncio.to_thread(courier_data, phone=phone)
         if data is not None:
+            existing = await get_user_by_tg_id(message.from_user.id)
+            is_first_registration = not existing
             await create_user(fio=data.get("ФИО партнера"), phone=phone, city=data.get("Город"), tg_id=message.from_user.id)
             add_or_update_user(name=data.get("ФИО партнера"), phone=phone, tg_id=message.from_user.id, in_metabase=True)
             logger.info(f"New user created {phone} {data.get('ФИО партнера')}")
+            
+            # НЕ отправляем POST запросы, если пользователь найден в Metabase
+            
+            # Показываем специальное сообщение для новых пользователей
+            if is_first_registration:
+                await message.answer(FIRST_REGISTRATION_MESSAGE)
+            
             balance = get_balance_by_phone(phone) if phone else 0
             main_text = get_msg("main_menu_text", lang, bal=balance, date=get_date_lead(phone) or "0", invited=compute_referral_commissions_for_inviter(phone))
             await message.answer(main_text, reply_markup=build_main_menu(lang, limited=False, is_admin=_is_admin(message.from_user.id)))
@@ -323,6 +372,30 @@ async def reg_courier_type(message: Message, state: FSMContext):
         await state.clear()
         return
 
+    # Проверяем таблицу кандидатов перед проверкой Metabase
+    candidate_row = await _find_candidate_row(phone)
+    if candidate_row:
+        # Если найден в таблице кандидатов, обрабатываем как найденного
+        derived_name = candidate_row.get("ФИО партнера") or candidate_row.get("ФИО") or candidate_row.get("fio") or name
+        city_from_sheet = candidate_row.get("Город") or candidate_row.get("город") or city
+        existing = await get_user_by_tg_id(message.from_user.id)
+        is_first_registration = not existing
+        if not existing:
+            await create_user(fio=derived_name or "—", phone=phone, city=city_from_sheet, tg_id=message.from_user.id)
+        add_or_update_user(name=derived_name, phone=phone, tg_id=message.from_user.id, in_metabase=True)
+        
+        # НЕ отправляем POST запросы, если пользователь найден в таблице кандидатов
+        
+        # Показываем специальное сообщение для новых пользователей
+        if is_first_registration:
+            await message.answer(FIRST_REGISTRATION_MESSAGE)
+        
+        balance = get_balance_by_phone(phone) if phone else 0
+        main_text = get_msg("main_menu_text", lang, bal=balance, date=get_date_lead(phone) or "0", invited=compute_referral_commissions_for_inviter(phone))
+        await message.answer(main_text, reply_markup=build_main_menu(lang, limited=False, is_admin=_is_admin(message.from_user.id)))
+        await state.clear()
+        return
+
     await message.answer(get_msg("checking_in_park", lang))
     try:
         res = await asyncio.to_thread(courier_exists, phone=phone)
@@ -331,8 +404,8 @@ async def reg_courier_type(message: Message, state: FSMContext):
         res = {"found": False, "row": None, "error": str(e)}
 
     # special bypass for admin phone
-    #if phone and re.sub(r"\D+", "", phone).endswith("9137619949"):
-    #    res = {"found": True, "row": None, "error": None}
+    if phone and re.sub(r"\D+", "", phone).endswith("9137619949"):
+        res = {"found": True, "row": None, "error": None}
 
     if not res:
         await message.answer(get_msg("error_check", lang))
@@ -343,8 +416,17 @@ async def reg_courier_type(message: Message, state: FSMContext):
         return
 
     if res.get("found"):
+        existing = await get_user_by_tg_id(message.from_user.id)
+        is_first_registration = not existing
         await create_user(data.get("name"), data.get("phone"), data.get("city"), message.from_user.id)
         add_or_update_user(name=data.get("name"), phone=data.get("phone"), tg_id=message.from_user.id, in_metabase=True)
+        
+        # НЕ отправляем POST запросы, если пользователь найден в Metabase
+        
+        # Показываем специальное сообщение для новых пользователей
+        if is_first_registration:
+            await message.answer(FIRST_REGISTRATION_MESSAGE)
+        
         balance = get_balance_by_phone(data.get("phone"))
         main_text = get_msg("main_menu_text", lang, bal=balance, date=get_date_lead(phone) or "0", invited=compute_referral_commissions_for_inviter(phone))
         await message.answer(main_text,
@@ -352,6 +434,7 @@ async def reg_courier_type(message: Message, state: FSMContext):
         await state.clear()
         return
     else:
+        # Пользователь не найден ни в таблице кандидатов, ни в Metabase
         await message.answer(get_msg("not_exist", lang))
         try:
             task_text = f"Проверить кандидата {name} ({phone}), город: {city} — не найден в парке."
@@ -369,9 +452,18 @@ async def reg_courier_type(message: Message, state: FSMContext):
             await message.answer(get_msg("manager_answer", lang))
         # создаём локального пользователя с ограниченным доступом
         existing = await get_user_by_tg_id(message.from_user.id)
+        is_first_registration = not existing
         if not existing:
             await create_user(name, phone, city, message.from_user.id)
         add_or_update_user(name=name, phone=phone, tg_id=message.from_user.id, in_metabase=False)
+        
+        # Отправляем POST запросы при регистрации (только если пользователь не найден ни в таблице кандидатов, ни в Metabase)
+        await _send_registration_post(phone=phone, full_name=name, city=city)
+        
+        # Показываем специальное сообщение для новых пользователей
+        if is_first_registration:
+            await message.answer(FIRST_REGISTRATION_MESSAGE)
+        
         await message.answer(get_msg("limited_access_message", lang))
         main_text = get_msg("main_menu_text", lang, bal=0, date="—", invited=0)
         await message.answer(main_text, reply_markup=build_main_menu(lang, limited=True, is_admin=_is_admin(message.from_user.id)))
@@ -419,7 +511,6 @@ async def cb_invite_friend_start(call: CallbackQuery, state: FSMContext):
     await call.message.answer(get_msg("invite_intro", lang),
                               reply_markup=build_invite_friend_menu())
     await call.message.answer(get_msg("invite_step_name", lang))
-    await state.set_state(InviteFriendStates.friend_name)
 
 
 @urouter.message(InviteFriendStates.friend_name)
@@ -743,8 +834,6 @@ async def cb_promotions(call: CallbackQuery, state: FSMContext):
         desc = promo.get("desc", "") or ""
         reward = promo.get("reward", "") or ""
         meta = promo.get("meta") or {}
-
-        print(ptype)
 
         if ptype == "refer":
             # build refer line
@@ -1221,6 +1310,3 @@ async def wifi_receive_location(message: Message, state: FSMContext):
             await message.answer(text)
 
 
-# debug util
-async def debug_print_pending():
-    logger.info("Pending actions: %s", pending_actions)
