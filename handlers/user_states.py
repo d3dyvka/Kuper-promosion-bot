@@ -2,12 +2,14 @@
 from aiogram.fsm.state import StatesGroup, State
 
 class RegState(StatesGroup):
+    awaiting_consent = State()
     FIO = State()
     phone_number = State()
     City = State()
     Type_of_curer = State()
 
 class InviteFriendStates(StatesGroup):
+    awaiting_friend_consent = State()
     friend_name = State()
     friend_contact = State()
     friend_city = State()

@@ -775,5 +775,26 @@
     "tg": "Шумо ҳуқуқи боркунӣ надоред.",
     "ky": "Экспортко уруксат жок.",
     "en": "No permission to run the export."
+  },
+  "consent_message": {
+    "ru": "Для продолжения использования ботом нужно принять согласие с нашей [политикой](https://example.com/policy).",
+    "uz": "Botdan foydalanishni davom ettirish uchun bizning [siyosatimiz](https://example.com/policy) bilan rozilik berishingiz kerak.",
+    "tg": "Барои идома додани истифодаи бот, шумо бояд бо [сиёсати](https://example.com/policy) мо розӣ шавед.",
+    "ky": "Ботту колдонууну улантуу үчүн биздин [саясатыбыз](https://example.com/policy) менен макул болууңуз керек.",
+    "en": "To continue using the bot, you need to accept our [policy](https://example.com/policy)."
+  },
+  "friend_consent_message": {
+    "ru": "Для регистрации друга подтвердите, что он дает согласие на обработку персональных данных.",
+    "uz": "Do'stni ro'yxatdan o'tkazish uchun uning shaxsiy ma'lumotlarni qayta ishlashga roziligini tasdiqlang.",
+    "tg": "Барои сабти номи дӯст, лутфан тасдиқ кунед, ки ӯ ба коркарди маълумоти шахсӣ розӣ аст.",
+    "ky": "Достун каттоо үчүн, анын жеке маалыматтарды иштетүүгө макулдугун ырастаңыз.",
+    "en": "To register a friend, please confirm that they consent to the processing of personal data."
+  },
+  "btn_consent": {
+    "ru": "✅ Согласен",
+    "uz": "✅ Roziman",
+    "tg": "✅ Розигем",
+    "ky": "✅ Макул",
+    "en": "✅ I agree"
   }
 }

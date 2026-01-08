@@ -15,7 +15,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.utils.formatting import PhoneNumber
 
 from create_bot import bot
-from db.crud import create_user, get_user_by_tg_id, get_all_users
+from db.crud import create_user, get_user_by_tg_id, get_all_users, update_user_consent
 from jump.jump_integrations import get_balance_by_phone, perform_withdrawal
 from metabase.metabase_integration import get_completed_orders_by_phone, courier_exists, get_promotions, get_date_lead, \
     compute_referral_commissions_for_inviter, courier_data, fetch_all_metabase_rows
@@ -246,6 +246,23 @@ async def cb_set_language(call: CallbackQuery, state: FSMContext):
 
     # Continue depending on whether user exists
     user = await get_user_by_tg_id(user_id)
+    
+    # Check if user has given consent
+    needs_consent = True
+    if user:
+        needs_consent = not getattr(user, "consent_accepted", False)
+    
+    if needs_consent:
+        # Show consent message with button
+        consent_text = get_msg("consent_message", lang)
+        consent_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=get_msg("btn_consent", lang), callback_data="consent_accept")]
+        ])
+        await call.message.answer(consent_text, reply_markup=consent_kb, parse_mode="Markdown")
+        await state.set_state(RegState.awaiting_consent)
+        return
+    
+    # User has consent, continue with normal flow
     if user:
         limited = await _is_limited_access(user.phone, getattr(user, "fio", None), user_id)
         balance = 0 if limited else (get_balance_by_phone(user.phone) if user else 0)
@@ -258,6 +275,39 @@ async def cb_set_language(call: CallbackQuery, state: FSMContext):
     else:
         # ask for FIO in selected language
         # отправляем скриншот вместе с текстом, если файл доступен
+        await call.message.answer(get_msg("get_contact_text", lang), reply_markup=contact_kb())
+        await _send_contact_screenshot(call.message)
+        await state.set_state(RegState.phone_number)
+
+
+@urouter.callback_query(F.data == "consent_accept", RegState.awaiting_consent)
+async def cb_consent_accept(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+    lang = _get_lang_for_user(call.from_user.id)
+    user_id = call.from_user.id
+    
+    # Save consent in state for later use when creating user
+    await state.update_data(consent_accepted=True)
+    
+    # Update consent in database if user exists
+    user = await get_user_by_tg_id(user_id)
+    if user:
+        await update_user_consent(user_id, True)
+    
+    # Continue with normal flow
+    user = await get_user_by_tg_id(user_id)
+    if user:
+        limited = await _is_limited_access(user.phone, getattr(user, "fio", None), user_id)
+        balance = 0 if limited else (get_balance_by_phone(user.phone) if user else 0)
+        date = get_date_lead(user.phone) if user and getattr(user, "phone", None) else None
+        add_or_update_user(name=getattr(user, "fio", None), phone=user.phone, tg_id=user_id, in_metabase=not limited)
+        main_text = get_msg("main_menu_text", lang, bal=balance, date=date or "0", invited=compute_referral_commissions_for_inviter(user.phone))
+        if limited:
+            await call.message.answer(get_msg("limited_access_message", lang))
+        await call.message.answer(main_text, reply_markup=build_main_menu(lang, limited=limited, is_admin=_is_admin(user_id)))
+        await state.clear()
+    else:
+        # ask for contact in selected language
         await call.message.answer(get_msg("get_contact_text", lang), reply_markup=contact_kb())
         await _send_contact_screenshot(call.message)
         await state.set_state(RegState.phone_number)
@@ -289,7 +339,9 @@ async def reg_contact(message: Message, state: FSMContext):
         existing = await get_user_by_tg_id(message.from_user.id)
         is_first_registration = not existing
         if not existing:
-            await create_user(fio=derived_name or "—", phone=phone, city=city, tg_id=message.from_user.id)
+            state_data = await state.get_data()
+            consent = state_data.get("consent_accepted", False)
+            await create_user(fio=derived_name or "—", phone=phone, city=city, tg_id=message.from_user.id, consent_accepted=consent)
         add_or_update_user(name=derived_name, phone=phone, tg_id=message.from_user.id, in_metabase=True)
         
         # НЕ отправляем POST запросы, если пользователь найден в таблице кандидатов
@@ -311,7 +363,9 @@ async def reg_contact(message: Message, state: FSMContext):
         if data is not None:
             existing = await get_user_by_tg_id(message.from_user.id)
             is_first_registration = not existing
-            await create_user(fio=data.get("ФИО партнера"), phone=phone, city=data.get("Город"), tg_id=message.from_user.id)
+            state_data = await state.get_data()
+            consent = state_data.get("consent_accepted", False)
+            await create_user(fio=data.get("ФИО партнера"), phone=phone, city=data.get("Город"), tg_id=message.from_user.id, consent_accepted=consent)
             add_or_update_user(name=data.get("ФИО партнера"), phone=phone, tg_id=message.from_user.id, in_metabase=True)
             logger.info(f"New user created {phone} {data.get('ФИО партнера')}")
             
@@ -381,7 +435,9 @@ async def reg_courier_type(message: Message, state: FSMContext):
         existing = await get_user_by_tg_id(message.from_user.id)
         is_first_registration = not existing
         if not existing:
-            await create_user(fio=derived_name or "—", phone=phone, city=city_from_sheet, tg_id=message.from_user.id)
+            state_data = await state.get_data()
+            consent = state_data.get("consent_accepted", False)
+            await create_user(fio=derived_name or "—", phone=phone, city=city_from_sheet, tg_id=message.from_user.id, consent_accepted=consent)
         add_or_update_user(name=derived_name, phone=phone, tg_id=message.from_user.id, in_metabase=True)
         
         # НЕ отправляем POST запросы, если пользователь найден в таблице кандидатов
@@ -418,7 +474,9 @@ async def reg_courier_type(message: Message, state: FSMContext):
     if res.get("found"):
         existing = await get_user_by_tg_id(message.from_user.id)
         is_first_registration = not existing
-        await create_user(data.get("name"), data.get("phone"), data.get("city"), message.from_user.id)
+        state_data = await state.get_data()
+        consent = state_data.get("consent_accepted", False)
+        await create_user(data.get("name"), data.get("phone"), data.get("city"), message.from_user.id, consent_accepted=consent)
         add_or_update_user(name=data.get("name"), phone=data.get("phone"), tg_id=message.from_user.id, in_metabase=True)
         
         # НЕ отправляем POST запросы, если пользователь найден в Metabase
@@ -454,7 +512,9 @@ async def reg_courier_type(message: Message, state: FSMContext):
         existing = await get_user_by_tg_id(message.from_user.id)
         is_first_registration = not existing
         if not existing:
-            await create_user(name, phone, city, message.from_user.id)
+            state_data = await state.get_data()
+            consent = state_data.get("consent_accepted", False)
+            await create_user(name, phone, city, message.from_user.id, consent_accepted=consent)
         add_or_update_user(name=name, phone=phone, tg_id=message.from_user.id, in_metabase=False)
         
         # Отправляем POST запросы при регистрации (только если пользователь не найден ни в таблице кандидатов, ни в Metabase)
@@ -506,6 +566,19 @@ async def cb_invite_friend_start(call: CallbackQuery, state: FSMContext):
     user = await get_user_by_tg_id(call.from_user.id)
     if await _deny_if_limited(call, lang, user):
         return
+    await call.answer()
+    # Show consent message for friend registration
+    consent_text = get_msg("friend_consent_message", lang)
+    consent_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=get_msg("btn_consent", lang), callback_data="friend_consent_accept")]
+    ])
+    await call.message.answer(consent_text, reply_markup=consent_kb)
+    await state.set_state(InviteFriendStates.awaiting_friend_consent)
+
+
+@urouter.callback_query(F.data == "friend_consent_accept", InviteFriendStates.awaiting_friend_consent)
+async def cb_friend_consent_accept(call: CallbackQuery, state: FSMContext):
+    lang = _get_lang_for_user(call.from_user.id)
     await call.answer()
     await state.set_state(InviteFriendStates.friend_name)
     await call.message.answer(get_msg("invite_intro", lang),
@@ -849,94 +922,94 @@ async def cb_promotions(call: CallbackQuery, state: FSMContext):
                 lines.append(line)
             continue
 
-        if ptype == "first":
-            base = title or get_msg("first_order_title_default", lang)
-            parts = [base]
-            if desc:
-                parts.append(desc)
-            if reward:
-                parts.append(get_msg("bonus_label", lang) + f" {reward}")
-            line = " - ".join(parts)
-            if line not in seen:
-                seen.add(line)
-                lines.append(line)
-            continue
+        # if ptype == "first":
+        #     base = title or get_msg("first_order_title_default", lang)
+        #     parts = [base]
+        #     if desc:
+        #         parts.append(desc)
+        #     if reward:
+        #         parts.append(get_msg("bonus_label", lang) + f" {reward}")
+        #     line = " - ".join(parts)
+        #     if line not in seen:
+        #         seen.add(line)
+        #         lines.append(line)
+        #     continue
 
-        if ptype == "completed":
-            # expected meta: threshold, end_date, coef_used, obj
-            th = meta.get("threshold") or meta.get("thresholds") or None
-            try:
-                th_int = int(th)
-            except Exception:
-                # maybe title contains number or promo id
-                try:
-                    th_int = int(str(title).split()[0])
-                except Exception:
-                    th_int = None
-            if th_int is None:
-                # fallback: include title text
-                line = f"{title} - {desc or '—'} - {reward} ₽"
-                if line not in seen:
-                    seen.add(line)
-                    lines.append(line)
-                continue
-
-            end_date_raw = meta.get("end_date") or meta.get("end_date_str") or None
-            end_date = None
-            if end_date_raw:
-                # many formats possible; try dd.mm.yyyy then iso
-                try:
-                    end_date = datetime.datetime.strptime(end_date_raw, "%d.%m.%Y").date()
-                    end_date_str = end_date.strftime("%d.%m.%Y")
-                except Exception:
-                    try:
-                        dt = datetime.datetime.fromisoformat(end_date_raw)
-                        end_date = dt.date()
-                        end_date_str = end_date.strftime("%d.%m.%Y")
-                    except Exception:
-                        end_date = None
-                        end_date_str = str(end_date_raw)
-            else:
-                end_date_str = "—"
-
-            # emoji logic
-            emoji = "⏳"  # default if no end_date
-            try:
-                if isinstance(total_orders, (int, float)) and total_orders >= th_int:
-                    emoji = "✅"
-                else:
-                    if end_date is None:
-                        emoji = "⏳"
-                    else:
-                        if end_date >= today:
-                            emoji = "⏳"
-                        else:
-                            emoji = "❌"
-            except Exception:
-                emoji = "⏳"
-
-            # reward numeric normalize
-            reward_str = str(reward).strip()
-            if reward_str == "":
-                reward_str = "0"
-            # ensure date formatted dd.mm.YYYY or —
-            line = f"{th_int} заказов - {end_date_str} - {reward_str} ₽ {emoji}"
-            if line not in seen:
-                seen.add(line)
-                lines.append(line)
-            continue
+        #         # if ptype == "completed":
+        #     # expected meta: threshold, end_date, coef_used, obj
+        #     th = meta.get("threshold") or meta.get("thresholds") or None
+        #     try:
+        #         th_int = int(th)
+        #     except Exception:
+        #         # maybe title contains number or promo id
+        #         try:
+        #             th_int = int(str(title).split()[0])
+        #         except Exception:
+        #             th_int = None
+        #     if th_int is None:
+        #         # fallback: include title text
+        #         line = f"{title} - {desc or '—'} - {reward} ₽"
+        #         if line not in seen:
+        #             seen.add(line)
+        #             lines.append(line)
+        #         continue
+        #
+        #     end_date_raw = meta.get("end_date") or meta.get("end_date_str") or None
+        #     end_date = None
+        #     if end_date_raw:
+        #         # many formats possible; try dd.mm.yyyy then iso
+        #         try:
+        #             end_date = datetime.datetime.strptime(end_date_raw, "%d.%m.%Y").date()
+        #             end_date_str = end_date.strftime("%d.%m.%Y")
+        #         except Exception:
+        #             try:
+        #                 dt = datetime.datetime.fromisoformat(end_date_raw)
+        #                 end_date = dt.date()
+        #                 end_date_str = end_date.strftime("%d.%m.%Y")
+        #             except Exception:
+        #                 end_date = None
+        #                 end_date_str = str(end_date_raw)
+        #     else:
+        #         end_date_str = "—"
+        #
+        #     # emoji logic
+        #     emoji = "⏳"  # default if no end_date
+        #     try:
+        #         if isinstance(total_orders, (int, float)) and total_orders >= th_int:
+        #             emoji = "✅"
+        #         else:
+        #             if end_date is None:
+        #                 emoji = "⏳"
+        #             else:
+        #                 if end_date >= today:
+        #                     emoji = "⏳"
+        #                 else:
+        #                     emoji = "❌"
+        #     except Exception:
+        #         emoji = "⏳"
+        #
+        #     # reward numeric normalize
+        #     reward_str = str(reward).strip()
+        #     if reward_str == "":
+        #         reward_str = "0"
+        #     # ensure date formatted dd.mm.YYYY or —
+        #     line = f"{th_int} заказов - {end_date_str} - {reward_str} ₽ {emoji}"
+        #     if line not in seen:
+        #         seen.add(line)
+        #         lines.append(line)
+        #     continue
 
         # fallback
-        base = title or get_msg("promo_default_title", lang)
-        parts = [base]
-        if desc:
-            parts.append(desc)
-        if reward:
-            parts.append(get_msg("reward_label", lang) + f" {reward}")
-        line = " - ".join(parts)
-        if line not in seen:
-            seen.add(line)
-            lines.append(line)
+        # base = title or get_msg("promo_default_title", lang)
+        # parts = [base]
+        # if desc:
+        #     parts.append(desc)
+        # if reward:
+        #     parts.append(get_msg("reward_label", lang) + f" {reward}")
+        # line = " - ".join(parts)
+        # if line not in seen:
+        #     seen.add(line)
+        #     lines.append(line)
 
     # prepare header + lines joined with blank line between
     header = get_msg("active_promotions", lang)

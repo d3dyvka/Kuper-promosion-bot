@@ -11,6 +11,7 @@ class Users(Base):
     fio = Column(String(255), nullable=False)
     phone = Column(String(40), nullable=False, index=True)
     city = Column(String(100), nullable=True)
+    consent_accepted = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=text("now()"))
 
 class InviteFriends(Base):
