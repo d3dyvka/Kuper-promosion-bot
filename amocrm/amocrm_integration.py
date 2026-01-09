@@ -14,10 +14,26 @@ from email.utils import formatdate
 
 logger = logging.getLogger("amocrm_sync")
 
-AMO_BASE_URL = config("AMO_BASE_URL")  # e.g. "https://yourcompany.amocrm.ru"
-AMO_ACCESS_TOKEN = config("AMO_ACCESS_TOKEN", "")
+AMO_BASE_URL = config("AMO_BASE_URL", "")  # e.g. "https://yourcompany.amocrm.ru"
+# Поддержка обоих вариантов имени переменной: AMO_ACCESS_TOKEN и AMOCRM_ACCESS_TOKEN
+AMO_ACCESS_TOKEN = config("AMO_ACCESS_TOKEN", "") or config("AMOCRM_ACCESS_TOKEN", "")
 PHONE_FIELD_ID = int(os.getenv("AMO_PHONE_FIELD_ID", "0"))  # id поля "Телефон"
-RESPONSIBLE_USER_ID = int(config("AMO_RESPONSIBLE_USER_ID", "0") or 0)
+RESPONSIBLE_USER_ID_RAW = config("AMO_RESPONSIBLE_USER_ID", "0")
+
+# Проверка конфигурации при загрузке модуля
+if not AMO_BASE_URL:
+    logger.warning("AMO_BASE_URL не задан в конфигурации")
+if not AMO_ACCESS_TOKEN:
+    logger.warning("AMO_ACCESS_TOKEN не задан в конфигурации. Задачи в amoCRM не будут создаваться.")
+try:
+    RESPONSIBLE_USER_ID = int(RESPONSIBLE_USER_ID_RAW) if RESPONSIBLE_USER_ID_RAW else 0
+except (ValueError, TypeError):
+    logger.warning(f"Invalid AMO_RESPONSIBLE_USER_ID value: {RESPONSIBLE_USER_ID_RAW}, using 0")
+    RESPONSIBLE_USER_ID = 0
+if RESPONSIBLE_USER_ID:
+    logger.info(f"AMO_RESPONSIBLE_USER_ID loaded: {RESPONSIBLE_USER_ID}")
+else:
+    logger.warning("AMO_RESPONSIBLE_USER_ID is not set or is 0, tasks will be created without responsible user")
 
 # chat integration config
 AMO_CHAT_SCOPE_ID = config("AMO_CHAT_SCOPE_ID", "")  # must be provided to create chats
@@ -83,8 +99,12 @@ class AmoCRMSession:
         parsed = _safe_json(r) if expect_json else None
 
         if status in (401, 403):
-            logger.error("AMO auth error %s: %s", status, text[:1000])
-            return {"ok": False, "status": status, "json": parsed, "text": text, "error": "auth"}
+            error_detail = ""
+            if parsed and isinstance(parsed, dict):
+                error_detail = parsed.get("detail") or parsed.get("title") or ""
+            logger.error("AMO auth error %s: %s. Detail: %s. Проверьте AMO_ACCESS_TOKEN в .env файле - токен мог истечь или быть неверным.", 
+                        status, text[:1000], error_detail)
+            return {"ok": False, "status": status, "json": parsed, "text": text, "error": "auth", "detail": error_detail}
         if status >= 400:
             logger.error("AMO API returned %s: %s", status, text[:1000])
             return {"ok": False, "status": status, "json": parsed, "text": text, "error": f"http_{status}"}
@@ -173,6 +193,9 @@ class AmoCRMSession:
         ]
         if RESPONSIBLE_USER_ID:
             payload[0]["responsible_user_id"] = RESPONSIBLE_USER_ID
+            logger.info(f"Creating task with responsible_user_id={RESPONSIBLE_USER_ID} for entity_id={entity_id}")
+        else:
+            logger.warning(f"RESPONSIBLE_USER_ID is not set (value: {RESPONSIBLE_USER_ID}), task will be created without responsible user")
 
         try:
             r = self.session.post(url, json=payload, timeout=10)
@@ -192,6 +215,7 @@ class AmoCRMSession:
 
         tid = _extract_id_from_response(j)
         if tid:
+            logger.info(f"Task created successfully with id={tid}")
             return tid
 
         logger.error("Unexpected create_task response structure: %s", j)
@@ -327,29 +351,51 @@ async def find_or_create_contact_and_create_task_async(name: str, phone: str, tg
     Returns detailed dict with ok/reason/contact_id/task_id/created_contact
     """
     result = {"ok": False, "reason": None, "contact_id": None, "task_id": None, "created_contact": False}
+    
+    # Проверка конфигурации
+    if not AMO_BASE_URL:
+        result["reason"] = "AMO_BASE_URL_not_configured"
+        logger.error("AMO_BASE_URL не задан, невозможно создать задачу в amoCRM")
+        return result
+    if not AMO_ACCESS_TOKEN:
+        result["reason"] = "AMO_ACCESS_TOKEN_not_configured"
+        logger.error("AMO_ACCESS_TOKEN не задан, невозможно создать задачу в amoCRM")
+        return result
+    
     try:
+        logger.info(f"Finding or creating contact for {name} ({phone}), tg_id: {tg_id}")
         contact = await find_contact_by_phone_async(phone)
         contact_id = None
         created_contact = False
         if contact:
             contact_id = int(contact.get("id"))
+            logger.info(f"Contact found with id={contact_id}")
         else:
+            logger.info(f"Contact not found, creating new contact for {name} ({phone})")
             contact_id = await create_contact_async(name=name, phones=[phone], responsible_user_id=RESPONSIBLE_USER_ID or None)
             created_contact = bool(contact_id)
+            if contact_id:
+                logger.info(f"Contact created with id={contact_id}")
+            else:
+                logger.error(f"Failed to create contact for {name} ({phone})")
         if not contact_id:
             result["reason"] = "contact_not_created"
+            logger.error(f"Cannot create task: contact_not_created for {name} ({phone})")
             return result
 
         due_ts = int(time.time()) + 60 * 60 * 24
         text = task_text or f"Проверить кандидата {name} ({phone}), tg:{tg_id}"
+        logger.info(f"Creating task for contact_id={contact_id}, text={text[:100]}")
         task_id = await create_task_async(text=text, entity_id=contact_id, timestamp=due_ts, entity_type='contacts')
         if not task_id:
             result["reason"] = "task_creation_failed"
             result["contact_id"] = contact_id
             result["created_contact"] = created_contact
+            logger.error(f"Failed to create task for contact_id={contact_id}, reason: task_creation_failed")
             return result
 
         result.update({"ok": True, "contact_id": contact_id, "task_id": task_id, "created_contact": created_contact})
+        logger.info(f"Task created successfully: task_id={task_id}, contact_id={contact_id}, responsible_user_id={RESPONSIBLE_USER_ID}")
         return result
 
     except Exception as e:

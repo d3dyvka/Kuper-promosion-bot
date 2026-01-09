@@ -200,10 +200,16 @@ async def _deny_if_limited(entity, lang: str, user) -> bool:
     return False
 
 
-async def _send_registration_post(phone: str, full_name: Optional[str] = None, city: Optional[str] = None, position: Optional[str] = None):
+async def _send_registration_post(phone: str, full_name: Optional[str] = None, city: Optional[str] = None, position: Optional[str] = None) -> Dict[str, Any]:
     """
     Отправляет POST запрос на эндпоинт при регистрации пользователя.
+    Возвращает dict с ключами:
+    - success: bool - успешно ли выполнен запрос
+    - already_registered: bool - зарегистрирован ли номер уже
+    - response_text: str - текст ответа от сервера
     """
+    result = {"success": False, "already_registered": False, "response_text": ""}
+    
     # Формируем данные в формате form-data, как ожидает эндпоинт
     data = aiohttp.FormData()
     data.add_field('phone', phone)
@@ -220,13 +226,40 @@ async def _send_registration_post(phone: str, full_name: Optional[str] = None, c
     async with aiohttp.ClientSession() as session:
         try:
             async with session.post(endpoint, data=data, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                response_text = await response.text()
+                result["response_text"] = response_text
+                
                 if response.status == 200:
-                    logger.info(f"POST запрос успешно отправлен на {endpoint} для телефона {phone}")
+                    logger.info(f"POST запрос успешно отправлен на {endpoint} для телефона {phone}. Ответ: {response_text[:200]}")
+                    result["success"] = True
+                    
+                    # Проверяем, зарегистрирован ли номер уже
+                    # Ищем в ответе индикаторы того, что номер уже зарегистрирован
+                    response_lower = response_text.lower()
+                    # Проверяем различные варианты сообщений о том, что номер уже зарегистрирован
+                    already_registered_indicators = [
+                        "уже зарегистрирован",
+                        "already registered",
+                        "уже существует",
+                        "already exists",
+                        "номер уже",
+                        "phone already",
+                        "уже есть",
+                        "duplicate"
+                    ]
+                    
+                    for indicator in already_registered_indicators:
+                        if indicator in response_lower:
+                            result["already_registered"] = True
+                            logger.info(f"Номер {phone} уже зарегистрирован согласно ответу POST запроса")
+                            break
                 else:
-                    response_text = await response.text()
-                    logger.warning(f"POST запрос на {endpoint} вернул статус {response.status} для телефона {phone}. Ответ: {response_text}")
+                    logger.warning(f"POST запрос на {endpoint} вернул статус {response.status} для телефона {phone}. Ответ: {response_text[:200]}")
         except Exception as e:
             logger.exception(f"Ошибка при отправке POST запроса на {endpoint} для телефона {phone}: {e}")
+            result["response_text"] = str(e)
+    
+    return result
 
 
 FIRST_REGISTRATION_MESSAGE = """Что делать дальше:
@@ -395,8 +428,10 @@ async def reg_contact(message: Message, state: FSMContext):
         logger.info(f"New phone number {phone} for contact {contact}")
 
     # 1) сначала ищем в таблице кандидатов
+    logger.info(f"Checking candidate table for phone: {phone}")
     candidate_row = await _find_candidate_row(phone)
     if candidate_row:
+        logger.info(f"User found in candidate table: {phone}")
         derived_name = candidate_row.get("ФИО партнера") or candidate_row.get("ФИО") or candidate_row.get("fio") or contact.first_name
         city = candidate_row.get("Город") or candidate_row.get("город")
         existing = await get_user_by_tg_id(message.from_user.id)
@@ -427,8 +462,11 @@ async def reg_contact(message: Message, state: FSMContext):
         return
 
     # 2) иначе проверяем Metabase
+    logger.info(f"Checking Metabase for phone: {phone}")
     res = await asyncio.to_thread(courier_exists, phone=phone)
+    logger.info(f"Metabase check result for {phone}: found={res.get('found')}, error={res.get('error')}")
     if res.get("found"):
+        logger.info(f"User found in Metabase: {phone}")
         data = await asyncio.to_thread(courier_data, phone=phone)
         if data is not None:
             existing = await get_user_by_tg_id(message.from_user.id)
@@ -461,6 +499,8 @@ async def reg_contact(message: Message, state: FSMContext):
         await state.clear()
         return
 
+    # 3) Пользователь не найден ни в таблице кандидатов, ни в Metabase
+    logger.info(f"User NOT found in candidate table or Metabase: {phone}, proceeding to manual registration")
     await state.update_data(phone=phone)
     await message.answer(get_msg("get_name_text", lang),
                          reply_markup=ReplyKeyboardRemove())
@@ -505,8 +545,10 @@ async def reg_courier_type(message: Message, state: FSMContext):
         return
 
     # Проверяем таблицу кандидатов перед проверкой Metabase
+    logger.info(f"[reg_courier_type] Checking candidate table for phone: {phone}")
     candidate_row = await _find_candidate_row(phone)
     if candidate_row:
+        logger.info(f"[reg_courier_type] User found in candidate table: {phone}")
         # Если найден в таблице кандидатов, обрабатываем как найденного
         derived_name = candidate_row.get("ФИО партнера") or candidate_row.get("ФИО") or candidate_row.get("fio") or name
         city_from_sheet = candidate_row.get("Город") or candidate_row.get("город") or city
@@ -538,15 +580,19 @@ async def reg_courier_type(message: Message, state: FSMContext):
         return
 
     await message.answer(get_msg("checking_in_park", lang))
+    logger.info(f"[reg_courier_type] Checking Metabase for phone: {phone}")
     try:
         res = await asyncio.to_thread(courier_exists, phone=phone)
     except Exception as e:
         logger.exception("Ошибка при проверке Metabase")
         res = {"found": False, "row": None, "error": str(e)}
+    
+    logger.info(f"[reg_courier_type] Metabase check result for {phone}: found={res.get('found')}, error={res.get('error')}")
 
     # special bypass for admin phone
-    if phone and re.sub(r"\D+", "", phone).endswith("9137619949"):
-        res = {"found": True, "row": None, "error": None}
+    #if phone and re.sub(r"\D+", "", phone).endswith("9137619949"):
+    #    logger.info(f"[reg_courier_type] Admin phone bypass for {phone}")
+    #    res = {"found": True, "row": None, "error": None}
 
     if not res:
         await message.answer(get_msg("error_check", lang))
@@ -557,6 +603,7 @@ async def reg_courier_type(message: Message, state: FSMContext):
         return
 
     if res.get("found"):
+        logger.info(f"[reg_courier_type] User found in Metabase: {phone}")
         existing = await get_user_by_tg_id(message.from_user.id)
         is_first_registration = not existing
         state_data = await state.get_data()
@@ -589,11 +636,14 @@ async def reg_courier_type(message: Message, state: FSMContext):
         return
     else:
         # Пользователь не найден ни в таблице кандидатов, ни в Metabase
+        logger.info(f"[reg_courier_type] User NOT found in candidate table or Metabase: {phone}, creating task in amoCRM and adding to Google Sheets")
         await message.answer(get_msg("not_exist", lang))
         try:
             task_text = f"Проверить кандидата {name} ({phone}), город: {city} — не найден в парке."
+            logger.info(f"[reg_courier_type] Attempting to create task in amoCRM for user not found: {name} ({phone}), tg_id: {tg_id}")
             res_amo = await find_or_create_contact_and_create_task_async(name=name, phone=phone, tg_id=tg_id,
                                                                          task_text=task_text)
+            logger.info(f"amoCRM result: ok={res_amo.get('ok')}, task_id={res_amo.get('task_id')}, contact_id={res_amo.get('contact_id')}, reason={res_amo.get('reason')}")
         except Exception as e:
             logger.exception("AMO error")
             res_amo = {"ok": False, "reason": str(e)}
@@ -602,8 +652,10 @@ async def reg_courier_type(message: Message, state: FSMContext):
         pending_actions[pid] = {"telegram_id": tg_id, "name": name, "phone": phone, "city": city, "status": "pending",
                                 "type": "not_in_park", "amo_result": res_amo}
         if res_amo.get("ok"):
-            logger.info(f"Задача создана в amoCRM. ID задачи: {res_amo.get('task_id')}.")
+            logger.info(f"Задача создана в amoCRM. ID задачи: {res_amo.get('task_id')}, contact_id: {res_amo.get('contact_id')}")
             await message.answer(get_msg("manager_answer", lang))
+        else:
+            logger.warning(f"Не удалось создать задачу в amoCRM. Причина: {res_amo.get('reason')}")
         # создаём локального пользователя с ограниченным доступом
         existing = await get_user_by_tg_id(message.from_user.id)
         is_first_registration = not existing
@@ -613,43 +665,49 @@ async def reg_courier_type(message: Message, state: FSMContext):
             await create_user(name, phone, city, message.from_user.id, consent_accepted=consent)
         add_or_update_user(name=name, phone=phone, tg_id=message.from_user.id, in_metabase=False)
         
-        # Добавляем пользователя в таблицу Ksuha18pro
+        # Добавляем пользователя в таблицу
         courier_type = data.get("courier_type") or ""
+        logger.info(f"[reg_courier_type] Attempting to add user to Google Sheets: {name} ({phone}), spreadsheet_id={EXTERNAL_SPREADSHEET_ID or SPREADSHEET_ID}")
         try:
             # Используем EXTERNAL_SPREADSHEET_ID или SPREADSHEET_ID по умолчанию
             spreadsheet_id = EXTERNAL_SPREADSHEET_ID or SPREADSHEET_ID
+            logger.info(f"[reg_courier_type] Using spreadsheet_id: {spreadsheet_id}")
             if spreadsheet_id:
                 ext_row = await asyncio.to_thread(
                     add_person_to_external_sheet,
                     spreadsheet_id=spreadsheet_id,
-                    sheet_name="Ksuha18pro",
+                    sheet_name="Лист1",
                     fio=name,
                     phone=phone,
                     city=city,
                     role=courier_type
                 )
                 if ext_row:
-                    logger.info(f"Пользователь {name} ({phone}) добавлен в таблицу Ksuha18pro, строка {ext_row}")
+                    logger.info(f"Пользователь {name} ({phone}) добавлен в таблицу, строка {ext_row}")
                 else:
-                    logger.warning(f"Не удалось добавить пользователя {name} ({phone}) в таблицу Ksuha18pro")
+                    logger.warning(f"Не удалось добавить пользователя {name} ({phone}) в таблицу")
             else:
-                logger.warning("EXTERNAL_SPREADSHEET_ID и SPREADSHEET_ID не заданы, пропускаем добавление в Ksuha18pro")
+                logger.warning("EXTERNAL_SPREADSHEET_ID и SPREADSHEET_ID не заданы, пропускаем добавление в таблицу")
         except Exception as e:
-            logger.exception(f"Ошибка при добавлении пользователя в таблицу Ksuha18pro: {e}")
+            logger.exception(f"Ошибка при добавлении пользователя в таблицу: {e}")
         
         # Отправляем POST запросы при регистрации (только если пользователь не найден ни в таблице кандидатов, ни в Metabase)
-        await _send_registration_post(phone=phone, full_name=name, city=city)
+        post_result = await _send_registration_post(phone=phone, full_name=name, city=city, position=courier_type)
         
-        # Показываем специальное сообщение для новых пользователей
+        # Показываем специальное сообщение для новых пользователей только если номер НЕ зарегистрирован
         if is_first_registration:
-            await message.answer(FIRST_REGISTRATION_MESSAGE)
-            await message.answer(FIRST_REGISTRATION_MESSAGE_CONTACTS)
-            if city:
-                address = await asyncio.to_thread(get_uniform_address_by_city, city)
-                if address:
-                    await message.answer(FIRST_REGISTRATION_MESSAGE_UNIFORM_EXISTS.format(uniform_address=address))
-                else:
-                    await message.answer(FIRST_REGISTRATION_MESSAGE_UNIFORM_NOT_EXISTS)
+            # Отправляем 3 сообщения только если номер НЕ зарегистрирован
+            if not post_result.get("already_registered", False):
+                await message.answer(FIRST_REGISTRATION_MESSAGE)
+                await message.answer(FIRST_REGISTRATION_MESSAGE_CONTACTS)
+                if city:
+                    address = await asyncio.to_thread(get_uniform_address_by_city, city)
+                    if address:
+                        await message.answer(FIRST_REGISTRATION_MESSAGE_UNIFORM_EXISTS.format(uniform_address=address))
+                    else:
+                        await message.answer(FIRST_REGISTRATION_MESSAGE_UNIFORM_NOT_EXISTS)
+            else:
+                logger.info(f"Номер {phone} уже зарегистрирован, пропускаем отправку приветственных сообщений")
         
         await message.answer(get_msg("limited_access_message", lang))
         main_text = get_msg("main_menu_text", lang, bal=0, date="—", invited=0)

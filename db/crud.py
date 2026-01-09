@@ -51,3 +51,18 @@ async def update_user_consent(tg_id: int, consent: bool):
             await session.refresh(user)
             return user
         return None
+
+
+async def delete_all_users():
+    """
+    Удаляет всех пользователей из базы данных.
+    Возвращает количество удаленных пользователей.
+    """
+    async with get_session() as session:
+        result = await session.execute(select(Users))
+        users = result.scalars().all()
+        count = len(users)
+        for user in users:
+            await session.delete(user)
+        await session.commit()
+        return count

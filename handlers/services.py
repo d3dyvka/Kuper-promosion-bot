@@ -520,25 +520,33 @@ def add_person_to_external_sheet(spreadsheet_id: str, sheet_name: str, fio: str,
     Returns new row index or None on failure.
     """
     try:
+        logger.info(f"add_person_to_external_sheet: spreadsheet_id={spreadsheet_id}, sheet_name={sheet_name}, fio={fio}, phone={phone}")
         creds = _load_credentials()  # reuse credentials
         client = gspread.authorize(creds)
         sheet = client.open_by_key(spreadsheet_id)
+        logger.info(f"Opened spreadsheet: {spreadsheet_id}")
         try:
             ws = sheet.worksheet(sheet_name)
-        except Exception:
+            logger.info(f"Found existing worksheet: {sheet_name}")
+        except Exception as e:
+            logger.warning(f"Worksheet '{sheet_name}' not found, attempting to create: {e}")
             # try to create worksheet if missing
             try:
                 ws = sheet.add_worksheet(title=sheet_name, rows="1000", cols="20")
-            except Exception:
-                logger.exception("Worksheet '%s' missing and cannot be created", sheet_name)
+                logger.info(f"Created new worksheet: {sheet_name}")
+            except Exception as e2:
+                logger.exception(f"Worksheet '{sheet_name}' missing and cannot be created: {e2}")
                 return None
 
         row = [fio or "", phone or "", city or "", role or ""]
+        logger.info(f"Appending row to sheet: {row}")
         ws.append_row(row, value_input_option="USER_ENTERED")
         vals = ws.get_all_values()
-        return len(vals)  # new total rows -> index of appended row
-    except Exception:
-        logger.exception("Failed to add person to external sheet")
+        row_count = len(vals)
+        logger.info(f"Successfully added row. Total rows in sheet: {row_count}")
+        return row_count  # new total rows -> index of appended row
+    except Exception as e:
+        logger.exception(f"Failed to add person to external sheet: spreadsheet_id={spreadsheet_id}, sheet_name={sheet_name}, error={e}")
         return None
 
 def find_invite_row_by_phone(phone: str) -> Optional[int]:
