@@ -608,3 +608,54 @@ def find_row_by_phone_in_sheet(title: str, phone: str, spreadsheet_id: Optional[
         except Exception:
             continue
     return None
+
+
+UNIFORM_ADDRESSES_SPREADSHEET_ID = "1m6WSlCKC9iR0gmNYSOLQWksZndZEgBnEoPlPlPaG0ck"
+UNIFORM_ADDRESSES_SHEET_NAME = "Лист1"
+
+
+def get_uniform_address_by_city(city: str) -> Optional[str]:
+    """
+    Ищет адрес получения формы по названию города в таблице Google Sheets.
+    
+    Args:
+        city: Название города, введенное пользователем
+        
+    Returns:
+        Адрес улицы для получения формы или None, если город не найден
+    """
+    if not city:
+        return None
+    
+    ws = _get_worksheet(UNIFORM_ADDRESSES_SHEET_NAME, spreadsheet_id=UNIFORM_ADDRESSES_SPREADSHEET_ID)
+    if not ws:
+        logger.warning("Не удалось получить доступ к листу '%s' в таблице адресов формы", UNIFORM_ADDRESSES_SHEET_NAME)
+        return None
+    
+    try:
+        vals = ws.get_all_values()
+    except Exception:
+        logger.exception("Ошибка при чтении листа '%s'", UNIFORM_ADDRESSES_SHEET_NAME)
+        return None
+    
+    if not vals or len(vals) < 1:
+        return None
+    
+    # Нормализуем введенный город для сравнения (без учета регистра и лишних пробелов)
+    city_normalized = _normalize_text(city)
+    
+    # Ищем в данных (столбец A - индекс 0, столбец B - индекс 1)
+    for row in vals:
+        if len(row) < 2:
+            continue
+        city_in_sheet = (row[0] or "").strip()
+        address = (row[1] or "").strip()
+        
+        # Нормализуем город из таблицы для сравнения
+        city_in_sheet_normalized = _normalize_text(city_in_sheet)
+        
+        # Сравниваем нормализованные значения
+        if city_normalized == city_in_sheet_normalized:
+            return address if address else None
+    
+    return None

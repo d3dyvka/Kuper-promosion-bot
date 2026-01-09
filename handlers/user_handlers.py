@@ -25,7 +25,7 @@ from .user_states import RegState, InviteFriendStates, PromoStates, WithdrawStat
 from .services import (
     load_json, contact_kb, location_request_kb,
     build_main_menu, build_invite_friend_menu, add_person_to_external_sheet, get_msg, manager_withdraw_kb,
-    find_row_by_phone_in_sheet, _load_credentials, SPREADSHEET_ID
+    find_row_by_phone_in_sheet, _load_credentials, SPREADSHEET_ID, get_uniform_address_by_city
 )
 from amocrm.amocrm_integration import find_or_create_contact_and_create_task_async
 from decouple import config
@@ -209,6 +209,40 @@ Android: https://kuper.ru/rabota/app
 2. 🎓 Зайди в Shopper по своему номеру телефона
 → Пройди «Курс новичка» (всего 10 минут!)"""
 
+FIRST_REGISTRATION_MESSAGE_CONTACTS = """
+• Горячая линия +78003332428
+• Поддержка нашего парка (WhatsApp и Telegram) +79911122678
+• Поддержка нашего парка (для звонков) +74999990125
+• Чат для наших партнёров в Телеграм https://t.me/KDlogisTik
+• Бонусы и привилегии для партнёров Купер https://partnersbenefits.kuper.ru
+• Телеграм-бот для поддержки партнёров https://t.me/sbermarket_manager_bot
+"""
+
+FIRST_REGISTRATION_MESSAGE_UNIFORM_EXISTS = """
+Для выполнения доставок необходим термокороб или термопакет. 🌟
+
+У вас есть четыре варианта:
+✅ Использовать термопакет (который можно купить в любом супермаркете).
+✅ Использовать свой короб — без брендирования и в исправном состоянии.
+✅ Купить новый — на маркетплейсах или Авито.
+✅ Взять в аренду у компании — внести залог 1 500 рублей. Залог вернём полностью, если вернёте короб целым.
+
+Важно: при получении формы нужен паспорт. 🪪
+
+Форму Вы можете получить по адресу: {uniform_address}
+"""
+
+FIRST_REGISTRATION_MESSAGE_UNIFORM_NOT_EXISTS = """
+Для выполнения доставок необходим термокороб или термопакет. 🌟
+
+У вас есть четыре варианта:
+✅ Использовать термопакет (который можно купить в любом супермаркете).
+✅ Использовать свой короб — без брендирования и в исправном состоянии.
+✅ Купить новый — на маркетплейсах или Авито.
+✅ Взять в аренду у компании — внести залог 1 500 рублей. Залог вернём полностью, если вернёте короб целым.
+
+Форма для выполнения заказов НЕ ОБЯЗАТЕЛЬНА! 
+"""
 
 MANAGER_CHAT_ID = config('MANAGER_CHAT_ID')
 EXTERNAL_SPREADSHEET_ID = config('EXTERNAL_SPREADSHEET_ID')
@@ -349,6 +383,13 @@ async def reg_contact(message: Message, state: FSMContext):
         # Показываем специальное сообщение для новых пользователей
         if is_first_registration:
             await message.answer(FIRST_REGISTRATION_MESSAGE)
+            await message.answer(FIRST_REGISTRATION_MESSAGE_CONTACTS)
+            if city:
+                address = await asyncio.to_thread(get_uniform_address_by_city, city)
+                if address:
+                    await message.answer(FIRST_REGISTRATION_MESSAGE_UNIFORM_EXISTS.format(uniform_address=address))
+                else:
+                    await message.answer(FIRST_REGISTRATION_MESSAGE_UNIFORM_NOT_EXISTS)
         
         balance = get_balance_by_phone(phone) if phone else 0
         main_text = get_msg("main_menu_text", lang, bal=balance, date=get_date_lead(phone) or "0", invited=compute_referral_commissions_for_inviter(phone))
@@ -374,6 +415,14 @@ async def reg_contact(message: Message, state: FSMContext):
             # Показываем специальное сообщение для новых пользователей
             if is_first_registration:
                 await message.answer(FIRST_REGISTRATION_MESSAGE)
+                await message.answer(FIRST_REGISTRATION_MESSAGE_CONTACTS)
+                city_from_data = data.get("Город")
+                if city_from_data:
+                    address = await asyncio.to_thread(get_uniform_address_by_city, city_from_data)
+                    if address:
+                        await message.answer(FIRST_REGISTRATION_MESSAGE_UNIFORM_EXISTS.format(uniform_address=address))
+                    else:
+                        await message.answer(FIRST_REGISTRATION_MESSAGE_UNIFORM_NOT_EXISTS)
             
             balance = get_balance_by_phone(phone) if phone else 0
             main_text = get_msg("main_menu_text", lang, bal=balance, date=get_date_lead(phone) or "0", invited=compute_referral_commissions_for_inviter(phone))
@@ -445,6 +494,13 @@ async def reg_courier_type(message: Message, state: FSMContext):
         # Показываем специальное сообщение для новых пользователей
         if is_first_registration:
             await message.answer(FIRST_REGISTRATION_MESSAGE)
+            await message.answer(FIRST_REGISTRATION_MESSAGE_CONTACTS)
+            if city_from_sheet:
+                address = await asyncio.to_thread(get_uniform_address_by_city, city_from_sheet)
+                if address:
+                    await message.answer(FIRST_REGISTRATION_MESSAGE_UNIFORM_EXISTS.format(uniform_address=address))
+                else:
+                    await message.answer(FIRST_REGISTRATION_MESSAGE_UNIFORM_NOT_EXISTS)
         
         balance = get_balance_by_phone(phone) if phone else 0
         main_text = get_msg("main_menu_text", lang, bal=balance, date=get_date_lead(phone) or "0", invited=compute_referral_commissions_for_inviter(phone))
@@ -476,16 +532,27 @@ async def reg_courier_type(message: Message, state: FSMContext):
         is_first_registration = not existing
         state_data = await state.get_data()
         consent = state_data.get("consent_accepted", False)
-        await create_user(data.get("name"), data.get("phone"), data.get("city"), message.from_user.id, consent_accepted=consent)
-        add_or_update_user(name=data.get("name"), phone=data.get("phone"), tg_id=message.from_user.id, in_metabase=True)
+        # Получаем данные из Metabase
+        metabase_data = await asyncio.to_thread(courier_data, phone=phone)
+        user_name = name if name else (metabase_data.get("ФИО партнера") if metabase_data else "—")
+        user_city = city if city else (metabase_data.get("Город") if metabase_data else None)
+        await create_user(fio=user_name, phone=phone, city=user_city, tg_id=message.from_user.id, consent_accepted=consent)
+        add_or_update_user(name=user_name, phone=phone, tg_id=message.from_user.id, in_metabase=True)
         
         # НЕ отправляем POST запросы, если пользователь найден в Metabase
         
         # Показываем специальное сообщение для новых пользователей
         if is_first_registration:
             await message.answer(FIRST_REGISTRATION_MESSAGE)
+            await message.answer(FIRST_REGISTRATION_MESSAGE_CONTACTS)
+            if user_city:
+                address = await asyncio.to_thread(get_uniform_address_by_city, user_city)
+                if address:
+                    await message.answer(FIRST_REGISTRATION_MESSAGE_UNIFORM_EXISTS.format(uniform_address=address))
+                else:
+                    await message.answer(FIRST_REGISTRATION_MESSAGE_UNIFORM_NOT_EXISTS)
         
-        balance = get_balance_by_phone(data.get("phone"))
+        balance = get_balance_by_phone(phone)
         main_text = get_msg("main_menu_text", lang, bal=balance, date=get_date_lead(phone) or "0", invited=compute_referral_commissions_for_inviter(phone))
         await message.answer(main_text,
                              reply_markup=build_main_menu(lang, limited=False, is_admin=_is_admin(message.from_user.id)))
@@ -523,6 +590,13 @@ async def reg_courier_type(message: Message, state: FSMContext):
         # Показываем специальное сообщение для новых пользователей
         if is_first_registration:
             await message.answer(FIRST_REGISTRATION_MESSAGE)
+            await message.answer(FIRST_REGISTRATION_MESSAGE_CONTACTS)
+            if city:
+                address = await asyncio.to_thread(get_uniform_address_by_city, city)
+                if address:
+                    await message.answer(FIRST_REGISTRATION_MESSAGE_UNIFORM_EXISTS.format(uniform_address=address))
+                else:
+                    await message.answer(FIRST_REGISTRATION_MESSAGE_UNIFORM_NOT_EXISTS)
         
         await message.answer(get_msg("limited_access_message", lang))
         main_text = get_msg("main_menu_text", lang, bal=0, date="—", invited=0)
