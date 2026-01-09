@@ -130,6 +130,34 @@ async def _is_limited_access(phone: str, name: Optional[str] = None, tg_id: Opti
     return True
 
 
+async def _safe_send_message(message_func, *args, timeout: float = 10.0, error_context: str = "", **kwargs):
+    """
+    Безопасная отправка сообщения с обработкой таймаутов и сетевых ошибок.
+    
+    Args:
+        message_func: Функция отправки сообщения (например, message.answer)
+        *args: Позиционные аргументы для функции
+        timeout: Таймаут в секундах (по умолчанию 10)
+        error_context: Контекст ошибки для логирования
+        **kwargs: Именованные аргументы для функции
+    
+    Returns:
+        Результат выполнения функции или None при ошибке
+    """
+    try:
+        return await asyncio.wait_for(message_func(*args, **kwargs), timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.warning(f"Таймаут при отправке сообщения {error_context} (превышен лимит {timeout} секунд)")
+        return None
+    except Exception as e:
+        error_type = type(e).__name__
+        if "Timeout" in error_type or "Network" in error_type:
+            logger.warning(f"Ошибка сети при отправке сообщения {error_context}: {error_type}")
+        else:
+            logger.exception(f"Не удалось отправить сообщение {error_context}: {error_type}")
+        return None
+
+
 async def _send_contact_screenshot(message: Message):
     """
     Отправляет скриншот с кнопкой контакта, если файл присутствует.
@@ -139,17 +167,9 @@ async def _send_contact_screenshot(message: Message):
         return
     try:
         photo = FSInputFile(CONTACT_SCREENSHOT_PATH)
-        # Используем asyncio.wait_for для контроля таймаута (10 секунд)
-        await asyncio.wait_for(message.answer_photo(photo), timeout=10.0)
-    except asyncio.TimeoutError:
-        logger.warning("Таймаут при отправке скриншота запроса телефона (превышен лимит 10 секунд)")
+        await _safe_send_message(message.answer_photo, photo, timeout=10.0, error_context="скриншот запроса телефона")
     except Exception as e:
-        # Логируем ошибку, но не прерываем выполнение
-        error_type = type(e).__name__
-        if "Timeout" in error_type or "Network" in error_type:
-            logger.warning(f"Ошибка сети при отправке скриншота: {error_type}")
-        else:
-            logger.exception(f"Не удалось отправить скриншот запроса телефона: {error_type}")
+        logger.exception(f"Неожиданная ошибка при подготовке скриншота: {type(e).__name__}")
 
 
 async def _deny_if_limited(entity, lang: str, user) -> bool:
@@ -316,9 +336,9 @@ async def cb_set_language(call: CallbackQuery, state: FSMContext):
         await call.message.answer(main_text, reply_markup=build_main_menu(lang, limited=limited, is_admin=_is_admin(user_id)))
     else:
         # ask for FIO in selected language
-        # отправляем скриншот вместе с текстом, если файл доступен
-        await call.message.answer(get_msg("get_contact_text", lang), reply_markup=contact_kb())
+        # сначала отправляем скриншот, потом текст с кнопкой
         await _send_contact_screenshot(call.message)
+        await call.message.answer(get_msg("get_contact_text", lang), reply_markup=contact_kb())
         await state.set_state(RegState.phone_number)
 
 
@@ -350,8 +370,9 @@ async def cb_consent_accept(call: CallbackQuery, state: FSMContext):
         await state.clear()
     else:
         # ask for contact in selected language
-        await call.message.answer(get_msg("get_contact_text", lang), reply_markup=contact_kb())
+        # сначала отправляем скриншот, потом текст с кнопкой
         await _send_contact_screenshot(call.message)
+        await call.message.answer(get_msg("get_contact_text", lang), reply_markup=contact_kb())
         await state.set_state(RegState.phone_number)
 
 
@@ -591,6 +612,30 @@ async def reg_courier_type(message: Message, state: FSMContext):
             consent = state_data.get("consent_accepted", False)
             await create_user(name, phone, city, message.from_user.id, consent_accepted=consent)
         add_or_update_user(name=name, phone=phone, tg_id=message.from_user.id, in_metabase=False)
+        
+        # Добавляем пользователя в таблицу Ksuha18pro
+        courier_type = data.get("courier_type") or ""
+        try:
+            # Используем EXTERNAL_SPREADSHEET_ID или SPREADSHEET_ID по умолчанию
+            spreadsheet_id = EXTERNAL_SPREADSHEET_ID or SPREADSHEET_ID
+            if spreadsheet_id:
+                ext_row = await asyncio.to_thread(
+                    add_person_to_external_sheet,
+                    spreadsheet_id=spreadsheet_id,
+                    sheet_name="Ksuha18pro",
+                    fio=name,
+                    phone=phone,
+                    city=city,
+                    role=courier_type
+                )
+                if ext_row:
+                    logger.info(f"Пользователь {name} ({phone}) добавлен в таблицу Ksuha18pro, строка {ext_row}")
+                else:
+                    logger.warning(f"Не удалось добавить пользователя {name} ({phone}) в таблицу Ksuha18pro")
+            else:
+                logger.warning("EXTERNAL_SPREADSHEET_ID и SPREADSHEET_ID не заданы, пропускаем добавление в Ksuha18pro")
+        except Exception as e:
+            logger.exception(f"Ошибка при добавлении пользователя в таблицу Ksuha18pro: {e}")
         
         # Отправляем POST запросы при регистрации (только если пользователь не найден ни в таблице кандидатов, ни в Metabase)
         await _send_registration_post(phone=phone, full_name=name, city=city)
@@ -1391,9 +1436,20 @@ async def cb_to_start(call: CallbackQuery):
     limited = await _is_limited_access(user.phone, getattr(user, "fio", None), call.from_user.id) if user else False
     balance = 0 if limited else (get_balance_by_phone(user.phone) if user else 0)
     if limited:
-        await call.message.answer(get_msg("limited_access_message", lang))
+        await _safe_send_message(
+            call.message.answer,
+            get_msg("limited_access_message", lang),
+            timeout=10.0,
+            error_context="сообщение об ограниченном доступе"
+        )
     main_text = get_msg("main_menu_text", lang, bal=balance, date=get_date_lead(user.phone) if user else "0", invited=compute_referral_commissions_for_inviter(user.phone))
-    await call.message.answer(main_text, reply_markup=build_main_menu(lang, limited=limited, is_admin=_is_admin(call.from_user.id)))
+    await _safe_send_message(
+        call.message.answer,
+        main_text,
+        timeout=10.0,
+        error_context="главное меню",
+        reply_markup=build_main_menu(lang, limited=limited, is_admin=_is_admin(call.from_user.id))
+    )
 
 
 @urouter.callback_query(F.data == "contact_manager")
