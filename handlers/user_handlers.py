@@ -133,15 +133,23 @@ async def _is_limited_access(phone: str, name: Optional[str] = None, tg_id: Opti
 async def _send_contact_screenshot(message: Message):
     """
     Отправляет скриншот с кнопкой контакта, если файл присутствует.
+    Не блокирует выполнение при ошибках сети или таймаутах.
     """
     if not CONTACT_SCREENSHOT_PATH or not os.path.exists(CONTACT_SCREENSHOT_PATH):
         return
     try:
         photo = FSInputFile(CONTACT_SCREENSHOT_PATH)
-        return await message.answer_photo(photo)
-    except Exception:
-        logger.exception("Не удалось отправить скриншот запроса телефона")
-        return
+        # Используем asyncio.wait_for для контроля таймаута (10 секунд)
+        await asyncio.wait_for(message.answer_photo(photo), timeout=10.0)
+    except asyncio.TimeoutError:
+        logger.warning("Таймаут при отправке скриншота запроса телефона (превышен лимит 10 секунд)")
+    except Exception as e:
+        # Логируем ошибку, но не прерываем выполнение
+        error_type = type(e).__name__
+        if "Timeout" in error_type or "Network" in error_type:
+            logger.warning(f"Ошибка сети при отправке скриншота: {error_type}")
+        else:
+            logger.exception(f"Не удалось отправить скриншот запроса телефона: {error_type}")
 
 
 async def _deny_if_limited(entity, lang: str, user) -> bool:
