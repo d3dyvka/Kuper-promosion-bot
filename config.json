@@ -777,11 +777,11 @@
     "en": "No permission to run the export."
   },
   "consent_message": {
-    "ru": "Для продолжения использования ботом нужно принять согласие с нашей [политикой](https://example.com/policy).",
-    "uz": "Botdan foydalanishni davom ettirish uchun bizning [siyosatimiz](https://example.com/policy) bilan rozilik berishingiz kerak.",
-    "tg": "Барои идома додани истифодаи бот, шумо бояд бо [сиёсати](https://example.com/policy) мо розӣ шавед.",
-    "ky": "Ботту колдонууну улантуу үчүн биздин [саясатыбыз](https://example.com/policy) менен макул болууңуз керек.",
-    "en": "To continue using the bot, you need to accept our [policy](https://example.com/policy)."
+    "ru": "Для продолжения использования ботом нужно принять согласие с нашей [политикой](https://drive.google.com/file/d/1IMqbLSmaHgfShaFSrZXQiBdlMaIEAXJ6/view?usp=sharing).",
+    "uz": "Botdan foydalanishni davom ettirish uchun bizning [siyosatimiz](https://drive.google.com/file/d/1IMqbLSmaHgfShaFSrZXQiBdlMaIEAXJ6/view?usp=sharing) bilan rozilik berishingiz kerak.",
+    "tg": "Барои идома додани истифодаи бот, шумо бояд бо [сиёсати](https://drive.google.com/file/d/1IMqbLSmaHgfShaFSrZXQiBdlMaIEAXJ6/view?usp=sharing) мо розӣ шавед.",
+    "ky": "Ботту колдонууну улантуу үчүн биздин [саясатыбыз](https://drive.google.com/file/d/1IMqbLSmaHgfShaFSrZXQiBdlMaIEAXJ6/view?usp=sharing) менен макул болууңуз керек.",
+    "en": "To continue using the bot, you need to accept our [policy](https://drive.google.com/file/d/1IMqbLSmaHgfShaFSrZXQiBdlMaIEAXJ6/view?usp=sharing)."
   },
   "friend_consent_message": {
     "ru": "Для регистрации друга подтвердите, что он дает согласие на обработку персональных данных.",
