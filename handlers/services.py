@@ -107,6 +107,15 @@ def contact_kb(lang: str = "ru"):
     return kb
 
 
+def wifi_apps_kb(lang: str = "ru"):
+    """Клавиатура с кнопкой 'Продолжить' для экрана с приложениями."""
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=get_msg("btn_continue", lang), callback_data="wifi_continue")]
+        ]
+    )
+    return kb
+
 def location_request_kb(lang: str = "ru"):
     kb = ReplyKeyboardMarkup(
         keyboard=[

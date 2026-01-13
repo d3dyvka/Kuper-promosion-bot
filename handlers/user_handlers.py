@@ -23,7 +23,7 @@ from wifi_map.wifi_services import find_wifi_near_location, get_available_wifi_p
 from users_store import add_or_update_user, is_in_metabase
 from .user_states import RegState, InviteFriendStates, PromoStates, WithdrawStates, WifiStates
 from .services import (
-    load_json, contact_kb, location_request_kb,
+    load_json, contact_kb, location_request_kb, wifi_apps_kb,
     build_main_menu, build_invite_friend_menu, add_person_to_external_sheet, get_msg, manager_withdraw_kb,
     find_row_by_phone_in_sheet, _load_credentials, SPREADSHEET_ID, get_uniform_address_by_city
 )
@@ -1526,7 +1526,7 @@ async def cb_contact_manager(call: CallbackQuery):
 @urouter.callback_query(F.data == "wifi_map")
 async def cb_wifi_map(call: CallbackQuery, state: FSMContext):
     """
-    Запрашиваем у пользователя геопозицию и ищем точки Wi‑Fi в радиусе 50 метров.
+    Показываем экран с приложениями перед запросом геопозиции.
     """
     lang = _get_lang_for_user(call.from_user.id)
     await call.answer()
@@ -1535,6 +1535,22 @@ async def cb_wifi_map(call: CallbackQuery, state: FSMContext):
     if not points:
         await call.message.answer(get_msg("wifi_map_no_points", lang))
         return
+
+    await state.set_state(WifiStates.showing_apps)
+    await call.message.answer(
+        get_msg("wifi_map_apps_intro", lang),
+        reply_markup=wifi_apps_kb(lang),
+        parse_mode="Markdown"
+    )
+
+
+@urouter.callback_query(F.data == "wifi_continue")
+async def cb_wifi_continue(call: CallbackQuery, state: FSMContext):
+    """
+    Обработчик кнопки 'Продолжить' - переводит к запросу геопозиции.
+    """
+    lang = _get_lang_for_user(call.from_user.id)
+    await call.answer()
 
     await state.set_state(WifiStates.waiting_location)
     await call.message.answer(

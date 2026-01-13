@@ -30,4 +30,5 @@ class WithdrawStates(StatesGroup):
 
 
 class WifiStates(StatesGroup):
+    showing_apps = State()
     waiting_location = State()

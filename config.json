@@ -796,5 +796,19 @@
     "tg": "✅ Розигем",
     "ky": "✅ Макул",
     "en": "✅ I agree"
+  },
+  "wifi_map_apps_intro": {
+    "ru": "📱 Вы можете предоставить вашу геопозицию, и мы предоставим вам бесплатные Wi‑Fi сети поблизости. Либо скачайте одно из этих приложений для вашего устройства:\n\n🤖 [Android приложение](https://play.google.com/store/apps/details?id=com.instabridge.android&pcampaignid=web_share)\n🍎 [iOS приложение](https://apps.apple.com/us/app/instabridge-esim-internet/id971679641)",
+    "uz": "📱 Siz o'z geolokatsiyangizni taqdim etishingiz mumkin va biz sizga yaqin atrofdagi bepul Wi‑Fi tarmoqlarini taqdim etamiz. Yoki qurilmangiz uchun ushbu ilovalardan birini yuklab oling:\n\n🤖 [Android ilovasi](https://play.google.com/store/apps/details?id=com.instabridge.android&pcampaignid=web_share)\n🍎 [iOS ilovasi](https://apps.apple.com/us/app/instabridge-esim-internet/id971679641)",
+    "tg": "📱 Шумо метавонед ҷойгиршавии худро пешниҳод кунед ва мо ба шумо шабакаҳои Wi‑Fi ройгон дар наздикӣ медиҳем. Ё яке аз ин барномаҳоро барои дастгоҳи худ бор кунед:\n\n🤖 [Барномаи Android](https://play.google.com/store/apps/details?id=com.instabridge.android&pcampaignid=web_share)\n🍎 [Барномаи iOS](https://apps.apple.com/us/app/instabridge-esim-internet/id971679641)",
+    "ky": "📱 Сиз өз геолокацияңызды берсеңиз, биз сизге жакын жердеги акысыз Wi‑Fi тармактарын беребиз. Же түзүлүшүңүз үчүн ушул колдонмолордун бирин жүктөп алыңыз:\n\n🤖 [Android колдонмосу](https://play.google.com/store/apps/details?id=com.instabridge.android&pcampaignid=web_share)\n🍎 [iOS колдонмосу](https://apps.apple.com/us/app/instabridge-esim-internet/id971679641)",
+    "en": "📱 You can provide your geolocation, and we will provide you with free Wi‑Fi networks nearby. Or download one of these apps for your device:\n\n🤖 [Android app](https://play.google.com/store/apps/details?id=com.instabridge.android&pcampaignid=web_share)\n🍎 [iOS app](https://apps.apple.com/us/app/instabridge-esim-internet/id971679641)"
+  },
+  "btn_continue": {
+    "ru": "➡️ Продолжить",
+    "uz": "➡️ Davom etish",
+    "tg": "➡️ Идома додан",
+    "ky": "➡️ Улантуу",
+    "en": "➡️ Continue"
   }
 }
