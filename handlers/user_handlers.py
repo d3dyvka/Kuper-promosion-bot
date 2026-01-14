@@ -312,20 +312,34 @@ EXTERNAL_SHEET_NAME = config('EXTERNAL_SHEET_NAME')
 
 @urouter.message(CommandStart())
 async def on_startup(message: Message, state: FSMContext):
-    await state.clear()
-    
-    # Извлекаем параметр из ссылки (например, "/start stat" -> "stat")
+    # Извлекаем параметр из ссылки ПЕРЕД очисткой state
+    # (например, "/start stat" -> "stat")
     link_param = None
-    if message.text and len(message.text.split()) > 1:
-        # message.text имеет формат "/start param" или "/start param1 param2"
-        parts = message.text.split(maxsplit=1)
+    
+    # В aiogram 3.x параметры команды передаются в message.text как "/start param"
+    if message.text:
+        logger.info(f"CommandStart message.text: '{message.text}'")
+        # Разбиваем текст команды на части
+        parts = message.text.strip().split(maxsplit=1)
         if len(parts) > 1:
             link_param = parts[1].strip()
+            logger.info(f"Extracted link_param: '{link_param}'")
+        else:
+            logger.info("No parameter found in command")
+    else:
+        logger.warning("CommandStart message.text is None or empty")
+    
+    # Очищаем state ПОСЛЕ извлечения параметра
+    await state.clear()
     
     # Сохраняем параметр в state, если он есть
     if link_param:
         await state.update_data(link_param=link_param)
-        logger.info(f"User {message.from_user.id} started bot with link parameter: {link_param}")
+        # Проверяем, что параметр сохранился
+        saved_data = await state.get_data()
+        logger.info(f"User {message.from_user.id} started bot with link parameter: '{link_param}'. Saved in state: {saved_data.get('link_param')}")
+    else:
+        logger.info(f"User {message.from_user.id} started bot without link parameter")
     
     # используем русский вариант, потому что это первый шаг (пока не выбран язык)
     prompt = get_msg("choose_language_prompt", "ru")
@@ -345,6 +359,14 @@ async def cb_set_language(call: CallbackQuery, state: FSMContext):
     lang = call.data.split("_", 1)[1]  # 'ru', 'uz', 'tg', 'ky'
     user_id = call.from_user.id
     user_langs[user_id] = lang
+    
+    # Проверяем наличие link_param в state
+    state_data = await state.get_data()
+    link_param = state_data.get("link_param")
+    if link_param:
+        logger.info(f"User {user_id} selected language {lang}, link_param preserved in state: '{link_param}'")
+    else:
+        logger.info(f"User {user_id} selected language {lang}, no link_param in state")
 
     # Send greeting in selected language
     try:
@@ -457,6 +479,7 @@ async def reg_contact(message: Message, state: FSMContext):
             
             # Записываем статистику, если пользователь зашел по специальной ссылке
             link_param = state_data.get("link_param")
+            logger.info(f"[reg_contact] Checking statistics for phone {phone}, link_param in state: {link_param}, is_first_registration: {is_first_registration}")
             if link_param:
                 # Проверяем, что статистика еще не записана для этого номера
                 existing_stat = await get_statistics_by_phone(phone)
@@ -504,6 +527,7 @@ async def reg_contact(message: Message, state: FSMContext):
             
             # Записываем статистику, если пользователь зашел по специальной ссылке
             link_param = state_data.get("link_param")
+            logger.info(f"[reg_contact] Checking statistics for phone {phone}, link_param in state: {link_param}, is_first_registration: {is_first_registration}")
             if link_param:
                 # Проверяем, что статистика еще не записана для этого номера
                 existing_stat = await get_statistics_by_phone(phone)
@@ -629,6 +653,7 @@ async def reg_courier_type_continue(message: Message, state: FSMContext, lang: s
             
             # Записываем статистику, если пользователь зашел по специальной ссылке
             link_param = state_data.get("link_param")
+            logger.info(f"[reg_courier_type_continue] Checking statistics for phone {phone}, link_param in state: {link_param}, is_first_registration: {is_first_registration}")
             if link_param:
                 # Проверяем, что статистика еще не записана для этого номера
                 existing_stat = await get_statistics_by_phone(phone)
@@ -697,6 +722,7 @@ async def reg_courier_type_continue(message: Message, state: FSMContext, lang: s
         
         # Записываем статистику, если пользователь зашел по специальной ссылке
         link_param = state_data.get("link_param")
+        logger.info(f"[reg_courier_type_continue] Checking statistics for phone {phone}, link_param in state: {link_param}, is_first_registration: {is_first_registration}")
         if link_param:
             # Проверяем, что статистика еще не записана для этого номера
             existing_stat = await get_statistics_by_phone(phone)
@@ -760,6 +786,7 @@ async def reg_courier_type_continue(message: Message, state: FSMContext, lang: s
             
             # Записываем статистику, если пользователь зашел по специальной ссылке
             link_param = state_data.get("link_param")
+            logger.info(f"[reg_courier_type_continue] Checking statistics for phone {phone}, link_param in state: {link_param}, is_first_registration: {is_first_registration}")
             if link_param:
                 # Проверяем, что статистика еще не записана для этого номера
                 existing_stat = await get_statistics_by_phone(phone)
