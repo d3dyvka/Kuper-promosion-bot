@@ -8,7 +8,7 @@ import gspread
 from gspread.utils import rowcol_to_a1
 import aiohttp
 from aiogram import Router, F
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart, Command, CommandObject
 from aiogram.types import Message, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.types import CallbackQuery, FSInputFile
 from aiogram.fsm.context import FSMContext
@@ -311,23 +311,27 @@ EXTERNAL_SHEET_NAME = config('EXTERNAL_SHEET_NAME')
 
 
 @urouter.message(CommandStart())
-async def on_startup(message: Message, state: FSMContext):
-    # Извлекаем параметр из ссылки ПЕРЕД очисткой state
-    # (например, "/start stat" -> "stat")
+async def on_startup(message: Message, state: FSMContext, command: CommandObject):
+    # Извлекаем параметр из ссылки через CommandObject.args
+    # В aiogram 3.x параметры команды передаются через CommandObject
     link_param = None
     
-    # В aiogram 3.x параметры команды передаются в message.text как "/start param"
-    if message.text:
-        logger.info(f"CommandStart message.text: '{message.text}'")
-        # Разбиваем текст команды на части
-        parts = message.text.strip().split(maxsplit=1)
-        if len(parts) > 1:
-            link_param = parts[1].strip()
-            logger.info(f"Extracted link_param: '{link_param}'")
-        else:
-            logger.info("No parameter found in command")
+    # Получаем параметр из CommandObject (для deep links типа t.me/bot/stat)
+    if command.args:
+        link_param = command.args.strip()
+        logger.info(f"CommandStart with parameter from CommandObject.args: '{link_param}'")
     else:
-        logger.warning("CommandStart message.text is None or empty")
+        # Также проверяем message.text для совместимости
+        if message.text:
+            logger.info(f"CommandStart message.text: '{message.text}'")
+            parts = message.text.strip().split(maxsplit=1)
+            if len(parts) > 1:
+                link_param = parts[1].strip()
+                logger.info(f"Extracted link_param from message.text: '{link_param}'")
+            else:
+                logger.info("No parameter found in command")
+        else:
+            logger.info("No parameter found in CommandObject.args and message.text is empty")
     
     # Очищаем state ПОСЛЕ извлечения параметра
     await state.clear()
