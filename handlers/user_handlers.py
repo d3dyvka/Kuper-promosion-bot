@@ -1586,7 +1586,16 @@ async def wifi_receive_location(message: Message, state: FSMContext):
         name = point.get("name") or get_msg("wifi_map_point_default_name", lang)
         desc = point.get("description") or ""
         dist = point.get("distance_m") or 0
-        text = get_msg("wifi_map_point_line_with_distance", lang, name=name, desc=desc, distance=dist)
+        # Формируем текст: только название и пароль (если есть), без шифрования
+        if desc:
+            # Если есть описание (пароль), показываем его
+            text = get_msg("wifi_map_point_line_with_distance", lang, name=name, desc=desc, distance=dist)
+        else:
+            # Если описания нет, показываем только название и расстояние
+            # Используем шаблон и убираем пустую строку описания
+            text_template = get_msg("wifi_map_point_line_with_distance", lang, name=name, desc="", distance=dist)
+            # Убираем пустую строку между названием и расстоянием (заменяем \n\n на \n)
+            text = text_template.replace(f"📍 {name}\n\n", f"📍 {name}\n")
         try:
             await message.answer_location(latitude=plat, longitude=plon)
         except Exception:

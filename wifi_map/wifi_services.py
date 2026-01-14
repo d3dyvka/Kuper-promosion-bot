@@ -191,15 +191,12 @@ def find_wifi_near_location(lat: float, lon: float, radius_m: float = 50.0) -> L
         except (TypeError, ValueError):
             continue
         ssid = (r.get("ssid") or "").strip()
-        # encryption, lasttime и др. можно использовать в описании
-        enc = (r.get("encryption") or "").strip()
-        desc_parts = []
-        if enc:
-            desc_parts.append(f"Шифрование: {enc}")
-        bssid = (r.get("bssid") or "").strip()
-        if bssid:
-            desc_parts.append(f"BSSID: {bssid}")
-        description = "\n".join(desc_parts)
+        # Убираем шифрование и BSSID, оставляем только название и пароль (если есть)
+        # Пароль обычно не приходит из WiGLE API, так как это открытые сети
+        password = (r.get("password") or "").strip()
+        description = ""
+        if password:
+            description = f"Пароль: {password}"
         points.append(
             {
                 "name": ssid or "Wi‑Fi сеть",
