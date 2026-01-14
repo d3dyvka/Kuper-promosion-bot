@@ -116,6 +116,17 @@ def wifi_apps_kb(lang: str = "ru"):
     )
     return kb
 
+def courier_type_kb(lang: str = "ru") -> InlineKeyboardMarkup:
+    """Клавиатура с тремя кнопками типов курьера: Пеший, Вело, Авто."""
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=get_msg("btn_courier_type_walking", lang), callback_data="courier_type_walking")],
+            [InlineKeyboardButton(text=get_msg("btn_courier_type_bike", lang), callback_data="courier_type_bike")],
+            [InlineKeyboardButton(text=get_msg("btn_courier_type_car", lang), callback_data="courier_type_car")]
+        ]
+    )
+    return kb
+
 def location_request_kb(lang: str = "ru"):
     kb = ReplyKeyboardMarkup(
         keyboard=[

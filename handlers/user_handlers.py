@@ -15,7 +15,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.utils.formatting import PhoneNumber
 
 from create_bot import bot
-from db.crud import create_user, get_user_by_tg_id, get_all_users, update_user_consent
+from db.crud import create_user, get_user_by_tg_id, get_all_users, update_user_consent, create_statistics_entry, get_statistics_by_phone
 from jump.jump_integrations import get_balance_by_phone, perform_withdrawal
 from metabase.metabase_integration import get_completed_orders_by_phone, courier_exists, get_promotions, get_date_lead, \
     compute_referral_commissions_for_inviter, courier_data, fetch_all_metabase_rows
@@ -23,7 +23,7 @@ from wifi_map.wifi_services import find_wifi_near_location, get_available_wifi_p
 from users_store import add_or_update_user, is_in_metabase
 from .user_states import RegState, InviteFriendStates, PromoStates, WithdrawStates, WifiStates
 from .services import (
-    load_json, contact_kb, location_request_kb, wifi_apps_kb,
+    load_json, contact_kb, location_request_kb, wifi_apps_kb, courier_type_kb,
     build_main_menu, build_invite_friend_menu, add_person_to_external_sheet, get_msg, manager_withdraw_kb,
     find_row_by_phone_in_sheet, _load_credentials, SPREADSHEET_ID, get_uniform_address_by_city
 )
@@ -313,6 +313,20 @@ EXTERNAL_SHEET_NAME = config('EXTERNAL_SHEET_NAME')
 @urouter.message(CommandStart())
 async def on_startup(message: Message, state: FSMContext):
     await state.clear()
+    
+    # Извлекаем параметр из ссылки (например, "/start stat" -> "stat")
+    link_param = None
+    if message.text and len(message.text.split()) > 1:
+        # message.text имеет формат "/start param" или "/start param1 param2"
+        parts = message.text.split(maxsplit=1)
+        if len(parts) > 1:
+            link_param = parts[1].strip()
+    
+    # Сохраняем параметр в state, если он есть
+    if link_param:
+        await state.update_data(link_param=link_param)
+        logger.info(f"User {message.from_user.id} started bot with link parameter: {link_param}")
+    
     # используем русский вариант, потому что это первый шаг (пока не выбран язык)
     prompt = get_msg("choose_language_prompt", "ru")
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -440,6 +454,19 @@ async def reg_contact(message: Message, state: FSMContext):
             state_data = await state.get_data()
             consent = state_data.get("consent_accepted", False)
             await create_user(fio=derived_name or "—", phone=phone, city=city, tg_id=message.from_user.id, consent_accepted=consent)
+            
+            # Записываем статистику, если пользователь зашел по специальной ссылке
+            link_param = state_data.get("link_param")
+            if link_param:
+                # Проверяем, что статистика еще не записана для этого номера
+                existing_stat = await get_statistics_by_phone(phone)
+                if not existing_stat:
+                    try:
+                        await create_statistics_entry(phone=phone, tg_id=message.from_user.id, link_param=link_param)
+                        logger.info(f"Statistics entry created for phone {phone}, tg_id {message.from_user.id}, link_param {link_param}")
+                    except Exception as e:
+                        logger.exception(f"Failed to create statistics entry for phone {phone}: {e}")
+        
         add_or_update_user(name=derived_name, phone=phone, tg_id=message.from_user.id, in_metabase=True)
         
         # НЕ отправляем POST запросы, если пользователь найден в таблице кандидатов
@@ -474,6 +501,19 @@ async def reg_contact(message: Message, state: FSMContext):
             state_data = await state.get_data()
             consent = state_data.get("consent_accepted", False)
             await create_user(fio=data.get("ФИО партнера"), phone=phone, city=data.get("Город"), tg_id=message.from_user.id, consent_accepted=consent)
+            
+            # Записываем статистику, если пользователь зашел по специальной ссылке
+            link_param = state_data.get("link_param")
+            if link_param:
+                # Проверяем, что статистика еще не записана для этого номера
+                existing_stat = await get_statistics_by_phone(phone)
+                if not existing_stat:
+                    try:
+                        await create_statistics_entry(phone=phone, tg_id=message.from_user.id, link_param=link_param)
+                        logger.info(f"Statistics entry created for phone {phone}, tg_id {message.from_user.id}, link_param {link_param}")
+                    except Exception as e:
+                        logger.exception(f"Failed to create statistics entry for phone {phone}: {e}")
+            
             add_or_update_user(name=data.get("ФИО партнера"), phone=phone, tg_id=message.from_user.id, in_metabase=True)
             logger.info(f"New user created {phone} {data.get('ФИО партнера')}")
             
@@ -525,19 +565,47 @@ async def menu(message: Message, state: FSMContext):
 async def reg_city(message: Message, state: FSMContext):
     lang = _get_lang_for_user(message.from_user.id)
     await state.update_data(city=message.text.strip())
-    await message.answer(get_msg("courier_type_text", lang))
+    await message.answer(get_msg("courier_type_text", lang), reply_markup=courier_type_kb(lang))
     await state.set_state(RegState.Type_of_curer)
 
 
-@urouter.message(RegState.Type_of_curer)
-async def reg_courier_type(message: Message, state: FSMContext):
-    lang = _get_lang_for_user(message.from_user.id)
-    await state.update_data(courier_type=message.text.strip())
+@urouter.callback_query(F.data.in_(["courier_type_walking", "courier_type_bike", "courier_type_car"]), RegState.Type_of_curer)
+async def cb_courier_type(call: CallbackQuery, state: FSMContext):
+    """Обработчик выбора типа курьера через кнопки."""
+    lang = _get_lang_for_user(call.from_user.id)
+    await call.answer()
+    
+    # Валидация: проверяем, что выбран один из трех типов
+    courier_type_map = {
+        "courier_type_walking": "Пеший",
+        "courier_type_bike": "Вело",
+        "courier_type_car": "Авто"
+    }
+    
+    selected_type = call.data
+    if selected_type not in courier_type_map:
+        await call.message.answer(get_msg("invalid_courier_type", lang) if "invalid_courier_type" in load_json() else "Неверный тип курьера. Пожалуйста, выберите один из предложенных вариантов.")
+        return
+    
+    courier_type = courier_type_map[selected_type]
+    await state.update_data(courier_type=courier_type)
+    
+    # Удаляем сообщение с кнопками
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+    
+    # Продолжаем с существующей логикой регистрации
+    await reg_courier_type_continue(call.message, state, lang, call.from_user.id)
+
+
+async def reg_courier_type_continue(message: Message, state: FSMContext, lang: str, tg_id: int):
+    """Продолжение обработки регистрации после выбора типа курьера."""
     data = await state.get_data()
     name = data.get("name")
     phone = data.get("phone")
     city = data.get("city")
-    tg_id = message.from_user.id
 
     if not (name and phone and city):
         await message.answer(get_msg("incomplete_data_error", lang))
@@ -552,13 +620,26 @@ async def reg_courier_type(message: Message, state: FSMContext):
         # Если найден в таблице кандидатов, обрабатываем как найденного
         derived_name = candidate_row.get("ФИО партнера") or candidate_row.get("ФИО") or candidate_row.get("fio") or name
         city_from_sheet = candidate_row.get("Город") or candidate_row.get("город") or city
-        existing = await get_user_by_tg_id(message.from_user.id)
+        existing = await get_user_by_tg_id(tg_id)
         is_first_registration = not existing
         if not existing:
             state_data = await state.get_data()
             consent = state_data.get("consent_accepted", False)
-            await create_user(fio=derived_name or "—", phone=phone, city=city_from_sheet, tg_id=message.from_user.id, consent_accepted=consent)
-        add_or_update_user(name=derived_name, phone=phone, tg_id=message.from_user.id, in_metabase=True)
+            await create_user(fio=derived_name or "—", phone=phone, city=city_from_sheet, tg_id=tg_id, consent_accepted=consent)
+            
+            # Записываем статистику, если пользователь зашел по специальной ссылке
+            link_param = state_data.get("link_param")
+            if link_param:
+                # Проверяем, что статистика еще не записана для этого номера
+                existing_stat = await get_statistics_by_phone(phone)
+                if not existing_stat:
+                    try:
+                        await create_statistics_entry(phone=phone, tg_id=tg_id, link_param=link_param)
+                        logger.info(f"Statistics entry created for phone {phone}, tg_id {tg_id}, link_param {link_param}")
+                    except Exception as e:
+                        logger.exception(f"Failed to create statistics entry for phone {phone}: {e}")
+        
+        add_or_update_user(name=derived_name, phone=phone, tg_id=tg_id, in_metabase=True)
         
         # НЕ отправляем POST запросы, если пользователь найден в таблице кандидатов
         
@@ -604,7 +685,7 @@ async def reg_courier_type(message: Message, state: FSMContext):
 
     if res.get("found"):
         logger.info(f"[reg_courier_type] User found in Metabase: {phone}")
-        existing = await get_user_by_tg_id(message.from_user.id)
+        existing = await get_user_by_tg_id(tg_id)
         is_first_registration = not existing
         state_data = await state.get_data()
         consent = state_data.get("consent_accepted", False)
@@ -612,8 +693,21 @@ async def reg_courier_type(message: Message, state: FSMContext):
         metabase_data = await asyncio.to_thread(courier_data, phone=phone)
         user_name = name if name else (metabase_data.get("ФИО партнера") if metabase_data else "—")
         user_city = city if city else (metabase_data.get("Город") if metabase_data else None)
-        await create_user(fio=user_name, phone=phone, city=user_city, tg_id=message.from_user.id, consent_accepted=consent)
-        add_or_update_user(name=user_name, phone=phone, tg_id=message.from_user.id, in_metabase=True)
+        await create_user(fio=user_name, phone=phone, city=user_city, tg_id=tg_id, consent_accepted=consent)
+        
+        # Записываем статистику, если пользователь зашел по специальной ссылке
+        link_param = state_data.get("link_param")
+        if link_param:
+            # Проверяем, что статистика еще не записана для этого номера
+            existing_stat = await get_statistics_by_phone(phone)
+            if not existing_stat:
+                try:
+                    await create_statistics_entry(phone=phone, tg_id=tg_id, link_param=link_param)
+                    logger.info(f"Statistics entry created for phone {phone}, tg_id {tg_id}, link_param {link_param}")
+                except Exception as e:
+                    logger.exception(f"Failed to create statistics entry for phone {phone}: {e}")
+        
+        add_or_update_user(name=user_name, phone=phone, tg_id=tg_id, in_metabase=True)
         
         # НЕ отправляем POST запросы, если пользователь найден в Metabase
         
@@ -631,7 +725,7 @@ async def reg_courier_type(message: Message, state: FSMContext):
         balance = get_balance_by_phone(phone)
         main_text = get_msg("main_menu_text", lang, bal=balance, date=get_date_lead(phone) or "0", invited=compute_referral_commissions_for_inviter(phone))
         await message.answer(main_text,
-                             reply_markup=build_main_menu(lang, limited=False, is_admin=_is_admin(message.from_user.id)))
+                             reply_markup=build_main_menu(lang, limited=False, is_admin=_is_admin(tg_id)))
         await state.clear()
         return
     else:
@@ -657,13 +751,26 @@ async def reg_courier_type(message: Message, state: FSMContext):
         else:
             logger.warning(f"Не удалось создать задачу в amoCRM. Причина: {res_amo.get('reason')}")
         # создаём локального пользователя с ограниченным доступом
-        existing = await get_user_by_tg_id(message.from_user.id)
+        existing = await get_user_by_tg_id(tg_id)
         is_first_registration = not existing
         if not existing:
             state_data = await state.get_data()
             consent = state_data.get("consent_accepted", False)
-            await create_user(name, phone, city, message.from_user.id, consent_accepted=consent)
-        add_or_update_user(name=name, phone=phone, tg_id=message.from_user.id, in_metabase=False)
+            await create_user(name, phone, city, tg_id, consent_accepted=consent)
+            
+            # Записываем статистику, если пользователь зашел по специальной ссылке
+            link_param = state_data.get("link_param")
+            if link_param:
+                # Проверяем, что статистика еще не записана для этого номера
+                existing_stat = await get_statistics_by_phone(phone)
+                if not existing_stat:
+                    try:
+                        await create_statistics_entry(phone=phone, tg_id=tg_id, link_param=link_param)
+                        logger.info(f"Statistics entry created for phone {phone}, tg_id {tg_id}, link_param {link_param}")
+                    except Exception as e:
+                        logger.exception(f"Failed to create statistics entry for phone {phone}: {e}")
+        
+        add_or_update_user(name=name, phone=phone, tg_id=tg_id, in_metabase=False)
         
         # Добавляем пользователя в таблицу
         courier_type = data.get("courier_type") or ""
@@ -711,7 +818,7 @@ async def reg_courier_type(message: Message, state: FSMContext):
         
         await message.answer(get_msg("limited_access_message", lang))
         main_text = get_msg("main_menu_text", lang, bal=0, date="—", invited=0)
-        await message.answer(main_text, reply_markup=build_main_menu(lang, limited=True, is_admin=_is_admin(message.from_user.id)))
+        await message.answer(main_text, reply_markup=build_main_menu(lang, limited=True, is_admin=_is_admin(tg_id)))
         await state.clear()
         return
 
@@ -793,16 +900,39 @@ async def invite_friend_contact(message: Message, state: FSMContext):
 async def invite_friend_city(message: Message, state: FSMContext):
     lang = _get_lang_for_user(message.from_user.id)
     await state.update_data(friend_city=message.text.strip())
-    await message.answer(get_msg("invite_step_role", lang))
+    await message.answer(get_msg("invite_step_role", lang), reply_markup=courier_type_kb(lang))
     await state.set_state(InviteFriendStates.friend_role)
 
 
-@urouter.message(InviteFriendStates.friend_role)
-async def invite_friend_role(message: Message, state: FSMContext):
-    lang = _get_lang_for_user(message.from_user.id)
-    await state.update_data(friend_role=message.text.strip())
-    await message.answer(
-        get_msg("invite_step_birthday", lang))
+@urouter.callback_query(F.data.in_(["courier_type_walking", "courier_type_bike", "courier_type_car"]), InviteFriendStates.friend_role)
+async def cb_friend_role(call: CallbackQuery, state: FSMContext):
+    """Обработчик выбора типа курьера для друга через кнопки."""
+    lang = _get_lang_for_user(call.from_user.id)
+    await call.answer()
+    
+    # Валидация: проверяем, что выбран один из трех типов
+    courier_type_map = {
+        "courier_type_walking": "Пеший",
+        "courier_type_bike": "Вело",
+        "courier_type_car": "Авто"
+    }
+    
+    selected_type = call.data
+    if selected_type not in courier_type_map:
+        await call.message.answer(get_msg("invalid_courier_type", lang) if "invalid_courier_type" in load_json() else "Неверный тип курьера. Пожалуйста, выберите один из предложенных вариантов.")
+        return
+    
+    friend_role = courier_type_map[selected_type]
+    await state.update_data(friend_role=friend_role)
+    
+    # Удаляем сообщение с кнопками
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+    
+    # Продолжаем с запросом дня рождения
+    await call.message.answer(get_msg("invite_step_birthday", lang))
     await state.set_state(InviteFriendStates.friend_birthday)
 
 

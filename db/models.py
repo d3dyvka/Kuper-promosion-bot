@@ -29,3 +29,11 @@ class InviteFriends(Base):
         UniqueConstraint("tg_user_id", "invited_phone", name="uq_inviter_invitedphone"),
     )
     inviter = relationship("Users", backref="invite_friends", foreign_keys=[tg_user_id])
+
+class Statistics(Base):
+    __tablename__ = "Statistics"
+    id = Column(Integer, primary_key=True, index=True)
+    phone = Column(String(40), nullable=False, index=True)
+    tg_id = Column(BigInteger, nullable=False, index=True)
+    link_param = Column(String(100), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=text("now()"))

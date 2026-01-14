@@ -1,7 +1,7 @@
 from sqlalchemy import select
 from decimal import Decimal
 from .db import get_session
-from .models import Users, InviteFriends
+from .models import Users, InviteFriends, Statistics
 
 
 async def create_user(fio: str, phone: str, city: str = None, tg_id: int = None, consent_accepted: bool = False):
@@ -66,3 +66,26 @@ async def delete_all_users():
             await session.delete(user)
         await session.commit()
         return count
+
+
+async def create_statistics_entry(phone: str, tg_id: int, link_param: str):
+    """
+    Создает запись статистики о переходе по ссылке.
+    """
+    async with get_session() as session:
+        obj = Statistics(phone=phone, tg_id=tg_id, link_param=link_param)
+        session.add(obj)
+        await session.commit()
+        await session.refresh(obj)
+        return obj
+
+
+async def get_statistics_by_phone(phone: str):
+    """
+    Проверяет, существует ли запись статистики для данного номера телефона.
+    Возвращает первую найденную запись или None.
+    """
+    async with get_session() as session:
+        q = select(Statistics).where(Statistics.phone == phone)
+        result = await session.execute(q)
+        return result.scalars().first()
