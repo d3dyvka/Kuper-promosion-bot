@@ -161,11 +161,11 @@
     "en": "📎 Send my number"
   },
   "get_contact_text": {
-    "ru": "📩 Отправьте свой номер телефона, нажав на кнопку 'Отправить номер телефона' в меню 👇",
-    "uz": "📩 Telefon raqamingizni yuborish uchun menudagi 'Telefon raqamini yuborish' tugmasini bosing 👇",
-    "tg": "📩 Рақами телефонатонро фиристодан, меню дар тугмаи 'Рақами телефонатонро фиристедан' -ро пахш кунед 👇",
-    "ky": "📩 Телефон номуруңузду жөнөтүү үчүн менюдөгү 'Телефон номуруңузду жөнөтүү' баскычын басыңыз 👇",
-    "en": "📩 Send your phone number by clicking the 'Send phone number' button in the menu below 👇"
+    "ru": "📩 Нажмите на кнопку \"Отправить номер телефона\" в меню 👇",
+    "uz": "📩 Menudagi \"Telefon raqamini yuborish\" tugmasini bosing 👇",
+    "tg": "📩 Меню дар тугмаи \"Рақами телефонатонро фиристедан\" -ро пахш кунед 👇",
+    "ky": "📩 Менюдөгү \"Телефон номуруңузду жөнөтүү\" баскычын басыңыз 👇",
+    "en": "📩 Click the \"Send phone number\" button in the menu 👇"
   },
   "ask_city_text": {
     "ru": "📍 Укажите ваш город:",
