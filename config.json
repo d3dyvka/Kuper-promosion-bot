@@ -161,11 +161,11 @@
     "en": "📎 Send my number"
   },
   "get_contact_text": {
-    "ru": "📩 Отправьте свой номер телефона, нажав кнопку на клавиатуре.",
-    "uz": "📩 Klaviaturadagi tugma orqali raqamingizni yuboring.",
-    "tg": "📩 Рақами телефонатонро бо тугма дар клавиатура фиристед.",
-    "ky": "📩 Кийин клавиатурадагы баскыч аркылуу телефон номуруңузду жөнөтүңүз.",
-    "en": "📩 Send your phone number using the keyboard button below."
+    "ru": "📩 Отправьте свой номер телефона, нажав на кнопку 'Отправить номер телефона' в меню 👇",
+    "uz": "📩 Telefon raqamingizni yuborish uchun menudagi 'Telefon raqamini yuborish' tugmasini bosing 👇",
+    "tg": "📩 Рақами телефонатонро фиристодан, меню дар тугмаи 'Рақами телефонатонро фиристедан' -ро пахш кунед 👇",
+    "ky": "📩 Телефон номуруңузду жөнөтүү үчүн менюдөгү 'Телефон номуруңузду жөнөтүү' баскычын басыңыз 👇",
+    "en": "📩 Send your phone number by clicking the 'Send phone number' button in the menu below 👇"
   },
   "ask_city_text": {
     "ru": "📍 Укажите ваш город:",
@@ -175,11 +175,11 @@
     "en": "📍 Please enter your city:"
   },
   "courier_type_text": {
-    "ru": "🚴‍♂️🚶‍♂️🚗 Выберите тип курьера:",
-    "uz": "🚴‍♂️🚶‍♂️🚗 Yetkazib beruvchi turini tanlang:",
-    "tg": "🚴‍♂️🚶‍♂️🚗 Навъи курьерро интихоб кунед:",
-    "ky": "🚴‍♂️🚶‍♂️🚗 Курьер түрүн тандаңыз:",
-    "en": "🚴‍♂️🚶‍♂️🚗 Choose courier type:"
+    "ru": "Выберите тип курьера:",
+    "uz": "Yetkazib beruvchi turini tanlang:",
+    "tg": "Навъи курьерро интихоб кунед:",
+    "ky": "Курьер түрүн тандаңыз:",
+    "en": "Choose courier type:"
   },
   "btn_courier_type_walking": {
     "ru": "🚶‍♂️ Пеший",
