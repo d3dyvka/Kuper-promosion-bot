@@ -49,6 +49,8 @@ def build_main_menu(lang: str = "ru", limited: bool = False, is_admin: bool = Fa
         if is_admin:
             buttons.append([InlineKeyboardButton(text=get_msg("btn_export_metabase", lang),
                                                  callback_data="export_metabase")])
+            buttons.append([InlineKeyboardButton(text=get_msg("btn_broadcast", lang),
+                                                 callback_data="broadcast")])
         return InlineKeyboardMarkup(inline_keyboard=buttons)
 
     buttons = [
@@ -61,6 +63,8 @@ def build_main_menu(lang: str = "ru", limited: bool = False, is_admin: bool = Fa
     if is_admin:
         buttons.append([InlineKeyboardButton(text=get_msg("btn_export_metabase", lang),
                                              callback_data="export_metabase")])
+        buttons.append([InlineKeyboardButton(text=get_msg("btn_broadcast", lang),
+                                             callback_data="broadcast")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -158,6 +162,16 @@ def user_after_confirm_kb(pid: str, lang: str = "ru") -> InlineKeyboardMarkup:
 def user_rejected_kb(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=get_msg("btn_back_to_main", lang), callback_data="to_start")]
+    ])
+
+
+def broadcast_confirm_kb(lang: str = "ru") -> InlineKeyboardMarkup:
+    """Клавиатура для подтверждения рассылки"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text=get_msg("btn_confirm_broadcast", lang), callback_data="broadcast_confirm"),
+            InlineKeyboardButton(text=get_msg("btn_cancel_broadcast", lang), callback_data="broadcast_cancel")
+        ]
     ])
 
 def promo_done_kb(promo_id: str, threshold: int = 0, sheet_row: int = 0, lang: str = "ru") -> InlineKeyboardMarkup:

@@ -831,5 +831,68 @@
     "tg": "➡️ Идома додан",
     "ky": "➡️ Улантуу",
     "en": "➡️ Continue"
+  },
+  "btn_broadcast": {
+    "ru": "📢 Рассылка",
+    "uz": "📢 Xabar yuborish",
+    "tg": "📢 Паҳнкунӣ",
+    "ky": "📢 Жарыялоо",
+    "en": "📢 Broadcast"
+  },
+  "broadcast_enter_message": {
+    "ru": "Введите сообщение для рассылки всем пользователям бота:",
+    "uz": "Bot foydalanuvchilariga yuborish uchun xabarni kiriting:",
+    "tg": "Барои ҳамаи корбарони бот паёмро ворид кунед:",
+    "ky": "Боттун бардык колдонуучуларына жиберүү үчүн билдирүүнү киргизиңиз:",
+    "en": "Enter the message to broadcast to all bot users:"
+  },
+  "broadcast_confirm": {
+    "ru": "Подтвердите отправку сообщения {count} пользователям:\n\n{message}",
+    "uz": "{count} foydalanuvchiga xabar yuborishni tasdiqlang:\n\n{message}",
+    "tg": "Ирсоли паём ба {count} корбар тасдиқ кунед:\n\n{message}",
+    "ky": "{count} колдонуучуга билдирүү жиберүүнү ырастаңыз:\n\n{message}",
+    "en": "Confirm sending message to {count} users:\n\n{message}"
+  },
+  "btn_confirm_broadcast": {
+    "ru": "✅ Подтвердить рассылку",
+    "uz": "✅ Xabar yuborishni tasdiqlash",
+    "tg": "✅ Паҳнкуниро тасдиқ кардан",
+    "ky": "✅ Жарыялоону ырастоо",
+    "en": "✅ Confirm broadcast"
+  },
+  "btn_cancel_broadcast": {
+    "ru": "❌ Отменить",
+    "uz": "❌ Bekor qilish",
+    "tg": "❌ Бекор кардан",
+    "ky": "❌ Жокко чыгаруу",
+    "en": "❌ Cancel"
+  },
+  "broadcast_started": {
+    "ru": "Рассылка запущена. Отправляю сообщения {count} пользователям...",
+    "uz": "Xabar yuborish boshlandi. {count} foydalanuvchiga xabar yuborilmoqda...",
+    "tg": "Паҳнкунӣ оғоз шуд. Ба {count} корбар паём фиристода мешавад...",
+    "ky": "Жарыялоо башталды. {count} колдонуучуга билдирүү жиберилүүдө...",
+    "en": "Broadcast started. Sending messages to {count} users..."
+  },
+  "broadcast_completed": {
+    "ru": "Рассылка завершена.\nОтправлено: {sent}\nОшибок: {errors}",
+    "uz": "Xabar yuborish tugallandi.\nYuborildi: {sent}\nXatolar: {errors}",
+    "tg": "Паҳнкунӣ анҷом шуд.\nФиристода шуд: {sent}\nХатогиҳо: {errors}",
+    "ky": "Жарыялоо аяктады.\nЖиберилди: {sent}\nКаталар: {errors}",
+    "en": "Broadcast completed.\nSent: {sent}\nErrors: {errors}"
+  },
+  "broadcast_cancelled": {
+    "ru": "Рассылка отменена.",
+    "uz": "Xabar yuborish bekor qilindi.",
+    "tg": "Паҳнкунӣ бекор карда шуд.",
+    "ky": "Жарыялоо жокко чыгарылды.",
+    "en": "Broadcast cancelled."
+  },
+  "broadcast_denied": {
+    "ru": "У вас нет прав для рассылки.",
+    "uz": "Sizda xabar yuborish huquqi yo'q.",
+    "tg": "Шумо ҳуқуқи паҳнкунӣ надоред.",
+    "ky": "Сизде жарыялоо укугу жок.",
+    "en": "You don't have permission to broadcast."
   }
 }
