@@ -19,7 +19,7 @@ logger.addHandler(logging.StreamHandler())
 logger.setLevel(logging.INFO)
 
 BASE = "https://metabase.sbmt.io"
-CARD_ID = 87869
+CARD_ID = []
 
 
 def update_metabase_token():
