@@ -32,3 +32,8 @@ class WithdrawStates(StatesGroup):
 class WifiStates(StatesGroup):
     showing_apps = State()
     waiting_location = State()
+
+
+class BroadcastStates(StatesGroup):
+    entering_message = State()
+    confirming = State()

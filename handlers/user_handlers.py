@@ -21,11 +21,11 @@ from metabase.metabase_integration import get_completed_orders_by_phone, courier
     compute_referral_commissions_for_inviter, courier_data, fetch_all_metabase_rows
 from wifi_map.wifi_services import find_wifi_near_location, get_available_wifi_points
 from users_store import add_or_update_user, is_in_metabase
-from .user_states import RegState, InviteFriendStates, PromoStates, WithdrawStates, WifiStates
+from .user_states import RegState, InviteFriendStates, PromoStates, WithdrawStates, WifiStates, BroadcastStates
 from .services import (
     load_json, contact_kb, location_request_kb, wifi_apps_kb, courier_type_kb,
     build_main_menu, build_invite_friend_menu, add_person_to_external_sheet, get_msg, manager_withdraw_kb,
-    find_row_by_phone_in_sheet, _load_credentials, SPREADSHEET_ID, get_uniform_address_by_city
+    find_row_by_phone_in_sheet, _load_credentials, SPREADSHEET_ID, get_uniform_address_by_city, broadcast_confirm_kb
 )
 from amocrm.amocrm_integration import find_or_create_contact_and_create_task_async
 from decouple import config
@@ -1763,5 +1763,129 @@ async def wifi_receive_location(message: Message, state: FSMContext):
             logger.exception("Не удалось отправить геолокацию для точки Wi-Fi %s", name)
         if text.strip():
             await message.answer(text)
+
+
+# --- Рассылка (только для админов) -------------------------------------------
+
+
+@urouter.callback_query(F.data == "broadcast")
+async def cb_broadcast_start(call: CallbackQuery, state: FSMContext):
+    """Начало рассылки - проверка прав и запрос сообщения"""
+    lang = _get_lang_for_user(call.from_user.id)
+    if not _is_admin(call.from_user.id):
+        await call.answer(get_msg("broadcast_denied", lang), show_alert=True)
+        return
+    
+    await call.answer()
+    await state.set_state(BroadcastStates.entering_message)
+    await call.message.answer(get_msg("broadcast_enter_message", lang))
+
+
+@urouter.message(BroadcastStates.entering_message)
+async def broadcast_enter_message(message: Message, state: FSMContext):
+    """Получение сообщения для рассылки и показ подтверждения"""
+    lang = _get_lang_for_user(message.from_user.id)
+    if not _is_admin(message.from_user.id):
+        await message.answer(get_msg("broadcast_denied", lang))
+        await state.clear()
+        return
+    
+    broadcast_message = message.text.strip()
+    if not broadcast_message:
+        await message.answer(get_msg("broadcast_enter_message", lang))
+        return
+    
+    # Получаем количество пользователей из БД
+    try:
+        users = await get_all_users()
+        user_count = len(users)
+    except Exception as e:
+        logger.exception("Failed to get users count for broadcast")
+        await message.answer(f"Ошибка получения списка пользователей: {str(e)}")
+        await state.clear()
+        return
+    
+    if user_count == 0:
+        await message.answer("В базе данных нет пользователей для рассылки.")
+        await state.clear()
+        return
+    
+    # Сохраняем сообщение в состоянии
+    await state.update_data(broadcast_message=broadcast_message)
+    await state.set_state(BroadcastStates.confirming)
+    
+    # Показываем подтверждение
+    confirm_text = get_msg("broadcast_confirm", lang, count=user_count, message=broadcast_message)
+    await message.answer(confirm_text, reply_markup=broadcast_confirm_kb(lang))
+
+
+@urouter.callback_query(F.data == "broadcast_confirm", BroadcastStates.confirming)
+async def cb_broadcast_confirm(call: CallbackQuery, state: FSMContext):
+    """Подтверждение рассылки и её выполнение"""
+    lang = _get_lang_for_user(call.from_user.id)
+    if not _is_admin(call.from_user.id):
+        await call.answer(get_msg("broadcast_denied", lang), show_alert=True)
+        await state.clear()
+        return
+    
+    await call.answer()
+    
+    # Получаем сообщение из состояния
+    data = await state.get_data()
+    broadcast_message = data.get("broadcast_message")
+    
+    if not broadcast_message:
+        await call.message.answer("Ошибка: сообщение для рассылки не найдено.")
+        await state.clear()
+        return
+    
+    # Получаем всех пользователей
+    try:
+        users = await get_all_users()
+    except Exception as e:
+        logger.exception("Failed to get users for broadcast")
+        await call.message.answer(f"Ошибка получения списка пользователей: {str(e)}")
+        await state.clear()
+        return
+    
+    if not users:
+        await call.message.answer("В базе данных нет пользователей для рассылки.")
+        await state.clear()
+        return
+    
+    # Уведомляем о начале рассылки
+    await call.message.answer(get_msg("broadcast_started", lang, count=len(users)))
+    
+    # Выполняем рассылку
+    sent_count = 0
+    error_count = 0
+    
+    for user in users:
+        if not user.tg_id:
+            error_count += 1
+            continue
+            
+        try:
+            await bot.send_message(user.tg_id, broadcast_message)
+            sent_count += 1
+            # Небольшая задержка между сообщениями для избежания лимитов
+            await asyncio.sleep(0.05)  # 50ms между сообщениями
+        except Exception as e:
+            logger.warning(f"Failed to send broadcast message to user {user.tg_id}: {e}")
+            error_count += 1
+    
+    # Отчет о результатах
+    result_text = get_msg("broadcast_completed", lang, sent=sent_count, errors=error_count)
+    await call.message.answer(result_text)
+    await state.clear()
+
+
+@urouter.callback_query(F.data == "broadcast_cancel", BroadcastStates.confirming)
+async def cb_broadcast_cancel(call: CallbackQuery, state: FSMContext):
+    """Отмена рассылки"""
+    lang = _get_lang_for_user(call.from_user.id)
+    await call.answer()
+    await call.message.answer(get_msg("broadcast_cancelled", lang))
+    await state.clear()
 
 
