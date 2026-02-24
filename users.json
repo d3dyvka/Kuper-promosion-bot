@@ -1,9 +1,9 @@
 [
   {
     "id": 1,
-    "name": "Рожков иван",
+    "name": "Рожков Иван Александрович",
     "phone": "79137619949",
     "tg_id": 998992278,
-    "in_metabase": false
+    "in_metabase": true
   }
 ]

@@ -23,7 +23,7 @@ propcache==0.4.1
 pyasn1==0.6.1
 pyasn1_modules==0.4.2
 pydantic==2.11.10
-pydantic_core==2.33.2
+pydantic_core
 python-decouple==3.8
 requests==2.32.5
 requests-oauthlib==2.0.0
